@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOTELIER diario</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Montserrat,sans-serif;background:#F7F7F6;color:#1A1A1A}
+button,input,textarea,select{font-family:Montserrat,sans-serif}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#C8C6C2;border-radius:3px}
+@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .8s linear infinite}
+/* Agrandir Grand via local @font-face fallback to Impact */
+@font-face{font-family:'Agrandir';src:local('Agrandir Grand'),local('AgrandirGrand-Bold'),local('Impact');font-weight:900}
+.ag{font-family:'Agrandir',Impact,Arial Black,sans-serif!important;font-weight:900!important;text-transform:uppercase!important;letter-spacing:-0.02em!important}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(function(){
+
+var e=React.createElement,useState=React.useState,useEffect=React.useEffect,useRef=React.useRef;
+
+/* STORAGE */
+var S={
+  key:function(){try{return localStorage.getItem('lo_key')||''}catch(x){return''}},
+  setKey:function(k){try{localStorage.setItem('lo_key',k)}catch(x){}},
+  pieces:function(){try{return JSON.parse(localStorage.getItem('lo_pieces')||'[]')}catch(x){return[]}},
+  save:function(p){var ps=S.pieces(),i=ps.findIndex(function(x){return x.id===p.id});if(i>=0)ps[i]=p;else ps.unshift(p);try{localStorage.setItem('lo_pieces',JSON.stringify(ps))}catch(x){}},
+  del:function(id){try{localStorage.setItem('lo_pieces',JSON.stringify(S.pieces().filter(function(p){return p.id!==id})))}catch(x){}},
+  briefing:function(){try{var d=JSON.parse(localStorage.getItem('lo_briefing')||'null');if(!d)return null;if((Date.now()-d.ts)/3600000>8)return null;return d.items}catch(x){return null}},
+  saveBriefing:function(d){try{localStorage.setItem('lo_briefing',JSON.stringify({items:d,ts:Date.now()}))}catch(x){}}
+};
+
+/* API CLAUDE */
+var callClaude=function(k,sys,user,onStream){
+  return fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':k,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-opus-4-5',max_tokens:2000,stream:!!onStream,system:sys,messages:[{role:'user',content:user}]})
+  }).then(function(r){
+    if(!r.ok)return r.json().then(function(e){throw new Error(e.error&&e.error.message||'Error API')});
+    if(onStream){
+      var rd=r.body.getReader(),dc=new TextDecoder(),full='';
+      var read=function(){return rd.read().then(function(x){
+        if(x.done)return full;
+        dc.decode(x.value).split('\n').filter(function(l){return l.startsWith('data: ')}).forEach(function(l){
+          try{var d=JSON.parse(l.slice(6));if(d.delta&&d.delta.text){full+=d.delta.text;onStream(full)}}catch(e){}
+        });
+        return read();
+      })};
+      return read();
+    }
+    return r.json().then(function(d){return d.content[0].text});
+  });
+};
+
+var SYS='Eres el motor editorial de LOTELIER DIARIO, publicacion de turismo y hosteleria. Voz ironica, canalla, directa. SOLO JSON valido sin markdown.';
+
+/* RSS SOURCES */
+var RSS_KEY='r5lnkpqr4qbcnykfsifl0ofd7jiwcl5f2nj0aumz';
+var FUENTES=[
+  /* Sector profesional ES */
+  {name:'Hosteltur',url:'https://www.hosteltur.com/rss-hosteltur',local:false,cat:'sector'},
+  {name:'Smart Travel News',url:'https://www.smarttravelnews.com/feed',local:false,cat:'sector'},
+  {name:'Nexotur',url:'https://www.nexotur.com/rss.xml',local:false,cat:'sector'},
+  {name:'Gaceta del Turismo',url:'https://www.gacetaturismo.com/feed',local:false,cat:'sector'},
+  {name:'Expreso',url:'https://www.expreso.info/rss.xml',local:false,cat:'sector'},
+  /* PR y visibilidad */
+  {name:'Agenttravel',url:'https://www.agenttravel.es/feed',local:false,cat:'agencias'},
+  {name:'Preferente',url:'https://www.preferente.com/feed',local:false,cat:'agencias'},
+  {name:'Tourinews',url:'https://www.tourinews.es/feed',local:false,cat:'agencias'},
+  /* Internacional */
+  {name:'Skift',url:'https://skift.com/feed',local:false,cat:'internacional'},
+  {name:'Travel Weekly',url:'https://www.travelweekly.com/rss',local:false,cat:'internacional'},
+  {name:'TTG Media',url:'https://www.ttgmedia.com/rss.xml',local:false,cat:'internacional'},
+  /* Local Valencia - solo turismo */
+  {name:'Valencia Plaza',url:'https://valenciaplaza.com/feed',local:true,cat:'local',filtrarTurismo:true},
+  {name:'Levante-EMV',url:'https://www.levante-emv.com/rss/2.0/',local:true,cat:'local',filtrarTurismo:true},
+  {name:'Las Provincias',url:'https://www.lasprovincias.es/rss/2.0/',local:true,cat:'local',filtrarTurismo:true}
+];
+
+var TOURISM_KEYWORDS=['hotel','turismo','turist','viaje','hostel','restaur','aerolin','airport','aeropuerto','destino','resort','booking','alojamiento','hospedaje','gastronomia','playa','vacacion','cruise','crucero','tour','travel','agencia','hotelero','pernoctacion','ocupacion','temporada'];
+
+var esTurismo=function(title,desc){
+  var text=(title+' '+(desc||'')).toLowerCase();
+  return TOURISM_KEYWORDS.some(function(kw){return text.includes(kw)});
+};
+
+var fetchFuente=function(f){
+  var url='https://api.rss2json.com/v1/api.json?rss_url='+encodeURIComponent(f.url)+'&count=8&api_key='+RSS_KEY;
+  return fetch(url,{signal:AbortSignal.timeout(12000)})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(!d.items||!d.items.length)return[];
+      return d.items.map(function(item){
+        return{
+          id:Math.random().toString(36).slice(2,10),
+          title:(item.title||'').trim(),
+          description:(item.description||'').replace(/<[^>]+>/g,'').trim().slice(0,220),
+          link:item.link||'',pubDate:item.pubDate||'',
+          source:f.name,local:f.local,cat:f.cat
+        };
+      }).filter(function(i){
+        if(i.title.length<10)return false;
+        if(f.filtrarTurismo)return esTurismo(i.title,i.description);
+        return true;
+      });
+    })
+    .catch(function(){return[]});
+};
+
+/* DOWNLOAD */
+var dlFile=function(url,name){
+  var a=document.createElement('a');
+  a.href=url;a.download=name;a.style.display='none';
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){document.body.removeChild(a)},300);
+};
+
+/* CANVAS RENDER - Magazine style */
+var wrapText=function(ctx,text,x,y,maxW,lineH,maxLines){
+  if(!text)return y;
+  var words=text.split(' '),line='',lines=[],cy=y;
+  for(var i=0;i<words.length;i++){
+    var test=line?line+' '+words[i]:words[i];
+    if(ctx.measureText(test).width>maxW&&line){lines.push(line);line=words[i];if(maxLines&&lines.length>=maxLines)break}
+    else line=test;
+  }
+  if(line&&(!maxLines||lines.length<maxLines))lines.push(line);
+  lines.forEach(function(l){ctx.fillText(l,x,cy);cy+=lineH});
+  return cy;
+};
+
+var addGrain=function(ctx,W,H,intensity){
+  intensity=intensity||20;
+  var d=ctx.getImageData(0,0,W,H),px=d.data;
+  for(var i=0;i<px.length;i+=4){
+    var n=(Math.random()-0.5)*intensity*2;
+    px[i]=Math.max(0,Math.min(255,px[i]+n));
+    px[i+1]=Math.max(0,Math.min(255,px[i+1]+n));
+    px[i+2]=Math.max(0,Math.min(255,px[i+2]+n));
+  }
+  ctx.putImageData(d,0,0);
+};
+
+var renderSlide=function(sl,idx,total,bgImg){
+  var W=1080,H=1350;
+  var cv=document.createElement('canvas');cv.width=W;cv.height=H;
+  var ctx=cv.getContext('2d');
+  var P=60;
+
+  /* Background */
+  if(bgImg){
+    try{
+      var ratio=Math.max(W/bgImg.width,H/bgImg.height);
+      var dw=bgImg.width*ratio,dh=bgImg.height*ratio;
+      ctx.drawImage(bgImg,(W-dw)/2,(H-dh)/2,dw,dh);
+      /* Dark overlay */
+      ctx.fillStyle='rgba(10,15,30,0.62)';ctx.fillRect(0,0,W,H);
+    }catch(x){
+      ctx.fillStyle='#202C44';ctx.fillRect(0,0,W,H);
+    }
+  } else {
+    ctx.fillStyle='#202C44';ctx.fillRect(0,0,W,H);
+  }
+
+  /* Grain texture */
+  addGrain(ctx,W,H,18);
+
+  /* Top bar */
+  ctx.fillStyle='rgba(255,255,255,0.06)';ctx.fillRect(0,0,W,90);
+
+  /* Logo top-left */
+  ctx.font='800 26px Montserrat,Arial';ctx.fillStyle='#fff';
+  ctx.fillText('LOTELIER',P,58);
+  ctx.font='italic 400 24px Montserrat,Arial';ctx.fillStyle='rgba(255,255,255,0.55)';
+  ctx.fillText(' diario',P+ctx.measureText('LOTELIER').width+2,58);
+
+  /* Collection top-right */
+  ctx.font='600 16px Montserrat,Arial';ctx.fillStyle='#3FB378';ctx.textAlign='right';
+  ctx.fillText('COLLECTION 0'+(idx+1)+'.',W-P,38);
+  ctx.font='600 14px Montserrat,Arial';ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.fillText(String(idx+1).padStart(2,'0')+'/'+String(total).padStart(2,'0'),W-P,58);
+  ctx.textAlign='left';
+
+  /* Green accent line */
+  ctx.fillStyle='#3FB378';ctx.fillRect(P,110,50,4);
+
+  /* CONTENT per tipo */
+  if(sl.tipo==='portada'){
+    /* Giant headline - Agrandir style */
+    ctx.font='900 148px Impact,Arial Black,sans-serif';ctx.fillStyle='#3FB378';
+    var y=wrapText(ctx,(sl.titular||'').toUpperCase(),P,340,W-P*2,148,3);
+    /* Subheadline */
+    if(sl.subtitulo){
+      ctx.font='700 36px Montserrat,Arial';ctx.fillStyle='#fff';
+      wrapText(ctx,sl.subtitulo,P,y+20,W-P*2,46,3);
+    }
+    /* Quote block if acento */
+    if(sl.acento_verde){
+      ctx.fillStyle='rgba(63,179,120,0.15)';ctx.fillRect(P-10,y+80,W-P*2+20,120);
+      ctx.font='italic 700 32px Montserrat,Arial';ctx.fillStyle='#3FB378';
+      wrapText(ctx,'"'+sl.acento_verde+'"',P+10,y+130,W-P*2,42,2);
+    }
+  } else if(sl.tipo==='dato'){
+    /* Big number */
+    ctx.font='900 220px Impact,Arial Black';ctx.fillStyle='#3FB378';
+    ctx.fillText(sl.numero_destacado||'',P,480);
+    ctx.font='600 38px Montserrat,Arial';ctx.fillStyle='#fff';
+    var y2=wrapText(ctx,sl.contexto||'',P,520,W-P*2,50,2);
+    if(sl.dato_extra){
+      ctx.fillStyle='rgba(255,255,255,0.1)';ctx.fillRect(P,y2+10,W-P*2,1);
+      ctx.font='400 28px Montserrat,Arial';ctx.fillStyle='rgba(255,255,255,0.5)';
+      wrapText(ctx,sl.dato_extra,P,y2+38,W-P*2,38,2);
+    }
+  } else if(sl.tipo==='texto'){
+    /* Section headline */
+    ctx.font='900 88px Impact,Arial Black';ctx.fillStyle='#fff';
+    var y3=wrapText(ctx,(sl.titular||'').toUpperCase(),P,300,W-P*2,92,3);
+    ctx.fillStyle='rgba(255,255,255,0.12)';ctx.fillRect(P,y3+10,W-P*2,1);
+    ctx.font='400 32px Montserrat,Arial';ctx.fillStyle='rgba(255,255,255,0.75)';
+    wrapText(ctx,sl.cuerpo||'',P,y3+42,W-P*2,46,5);
+  } else if(sl.tipo==='cita'){
+    /* Full quote */
+    ctx.font='800 72px Impact,Arial Black';ctx.fillStyle='rgba(63,179,120,0.3)';ctx.fillText('"',P-10,320);
+    ctx.font='italic 600 46px Montserrat,Arial';ctx.fillStyle='#fff';
+    var y4=wrapText(ctx,sl.cita||'',P,350,W-P*2,62,5);
+    ctx.fillStyle='#3FB378';ctx.fillRect(P,y4+15,60,3);
+    ctx.font='700 26px Montserrat,Arial';ctx.fillStyle='rgba(255,255,255,0.6)';
+    ctx.fillText((sl.autor||'').toUpperCase(),P,y4+55);
+  } else if(sl.tipo==='cierre'){
+    ctx.font='900 118px Impact,Arial Black';ctx.fillStyle='#fff';
+    var y5=wrapText(ctx,(sl.pregunta||'').toUpperCase(),P,320,W-P*2,122,4);
+    ctx.fillStyle='#3FB378';ctx.fillRect(P,y5+20,120,5);
+  }
+
+  /* Bottom bar */
+  ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(0,H-90,W,90);
+  ctx.font='700 18px Montserrat,Arial';ctx.fillStyle='#3FB378';
+  ctx.fillText('ORIGINAL MAGAZINE',P,H-50);
+  ctx.textAlign='right';
+  ctx.fillStyle='rgba(255,255,255,0.5)';
+  var d=new Date();
+  ctx.fillText(d.getDate()+' '+['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'][d.getMonth()]+' '+d.getFullYear(),W-P,H-50);
+  ctx.textAlign='left';
+  ctx.font='600 15px Montserrat,Arial';ctx.fillStyle='rgba(255,255,255,0.25)';
+  ctx.fillText('FUENTE: '+(sl.fuente||'LOTELIER DIARIO'),P,H-22);
+
+  return cv;
+};
+
+/* SLIDE PREVIEW - small version for editor */
+var SlideThumb=function(sl,idx,total,size,bgImg){
+  size=size||200;
+  var H=Math.round(1350/1080*size);
+  var r=size/1080;
+  var canRef=useRef(null);
+  useEffect(function(){
+    if(!canRef.current)return;
+    var cv=renderSlide(sl,idx,total,bgImg||null);
+    var ctx=canRef.current.getContext('2d');
+    canRef.current.width=size;canRef.current.height=H;
+    ctx.drawImage(cv,0,0,size,H);
+  },[sl,idx,total,bgImg,size]);
+  return e('canvas',{ref:canRef,width:size,height:H,style:{borderRadius:4,display:'block',flexShrink:0}});
+};
+
+/* COMPONENTS */
+var Btn=function(p){
+  var c={pri:{bg:'#3FB378',color:'#fff',border:'none'},sec:{bg:'transparent',color:'#6B6966',border:'1px solid #C8C6C2'},navy:{bg:'#202C44',color:'#fff',border:'none'},danger:{bg:'#E5484D',color:'#fff',border:'none'},ghost:{bg:'transparent',color:'#9E9B97',border:'none'},green:{bg:'#3FB378',color:'#fff',border:'none'}};
+  var s={sm:{fontSize:11,padding:'0 11px',height:29,borderRadius:6},md:{fontSize:12,padding:'0 15px',height:35,borderRadius:8},lg:{fontSize:13,padding:'0 20px',height:42,borderRadius:8}};
+  var col=c[p.v||'pri'],sz=s[p.sz||'md'],dis=p.dis||p.ld;
+  return e('button',{onClick:p.onClick,disabled:dis,style:Object.assign({},sz,col,{display:'inline-flex',alignItems:'center',justifyContent:'center',gap:6,fontWeight:700,letterSpacing:'0.02em',cursor:dis?'not-allowed':'pointer',opacity:dis?0.4:1,transition:'all .12s',whiteSpace:'nowrap',width:p.full?'100%':'auto'})},
+    p.ld?e('svg',{className:'spin',width:13,height:13,viewBox:'0 0 24 24',fill:'none'},e('circle',{cx:12,cy:12,r:10,stroke:'currentColor',strokeWidth:3,strokeDasharray:40,strokeDashoffset:15,strokeLinecap:'round'})):null,p.ch
+  );
+};
+
+var Top=function(title,actions){
+  return e('div',{style:{background:'#fff',borderBottom:'1px solid #E4E3E0',padding:'0 26px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}},
+    e('div',{style:{fontSize:15,fontWeight:700}},title),
+    e('div',{style:{display:'flex',gap:8,alignItems:'center'}},actions)
+  );
+};
+
+/* API MODAL */
+function ApiModal(p){
+  var s1=useState(p.cur||''),k=s1[0],setK=s1[1];
+  var s2=useState(false),t=s2[0],setT=s2[1];
+  var s3=useState(null),r=s3[0],setR=s3[1];
+  var test=function(){if(!k.startsWith('sk-ant-')){setR('err');return}setT(true);setR(null);callClaude(k,'Di OK','test').then(function(){setR('ok')}).catch(function(){setR('err')}).then(function(){setT(false)})};
+  return e('div',{style:{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:999}},
+    e('div',{style:{background:'#fff',borderRadius:16,padding:26,width:420,maxWidth:'90vw'}},
+      e('div',{style:{fontSize:15,fontWeight:800,marginBottom:4}},'API Anthropic'),
+      e('div',{style:{fontSize:11,color:'#9E9B97',marginBottom:14}},'Motor editorial LOTELIER'),
+      e('div',{style:{background:'#EBF7F2',borderRadius:8,padding:'8px 11px',marginBottom:12,fontSize:11,color:'#1E6B43',lineHeight:1.6}},'Tu key va directa a Anthropic. No pasa por ningun servidor.'),
+      e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#9E9B97',marginBottom:5}},'API KEY'),
+      e('input',{type:'password',value:k,onChange:function(ev){setK(ev.target.value);setR(null)},placeholder:'sk-ant-api03-...',style:{width:'100%',padding:'0 12px',height:40,border:'1px solid #E4E3E0',borderRadius:8,fontSize:13,outline:'none',background:'#F7F7F6',fontFamily:'monospace',marginBottom:10}}),
+      e('div',{style:{background:'#F0EFED',borderRadius:8,padding:'8px 11px',marginBottom:12,fontSize:11,color:'#6B6966',lineHeight:1.5}},'console.anthropic.com -> Sign up -> API Keys -> Create'),
+      r==='ok'?e('div',{style:{background:'#EBF7F2',borderRadius:8,padding:'8px 11px',marginBottom:10,fontSize:12,fontWeight:600,color:'#1E6B43'}},'Conexion correcta'):null,
+      r==='err'?e('div',{style:{background:'#FEE2E2',borderRadius:8,padding:'8px 11px',marginBottom:10,fontSize:12,fontWeight:600,color:'#B91C1C'}},'API key incorrecta o sin creditos'):null,
+      e('div',{style:{display:'flex',gap:8}},
+        Btn({ch:'Cancelar',v:'sec',sz:'md',onClick:p.onClose,full:true}),
+        Btn({ch:t?'Probando...':'Probar',v:'sec',sz:'md',onClick:test,ld:t,full:true}),
+        Btn({ch:'Guardar',v:'pri',sz:'md',onClick:function(){S.setKey(k);p.onSave(k)},dis:!k,full:true})
+      )
+    )
+  );
+}
+
+/* SIDEBAR */
+function Sidebar(p){
+  var nav=[{id:'home',l:'Home'},{id:'briefing',l:'Briefing diario'},{id:'nueva',l:'Nueva pieza'},{id:'biblioteca',l:'Biblioteca'},{id:'ajustes',l:'Ajustes'}];
+  return e('div',{style:{width:210,background:'#fff',borderRight:'1px solid #E4E3E0',display:'flex',flexDirection:'column',flexShrink:0,minHeight:'100vh'}},
+    e('div',{style:{padding:'16px 16px 12px',borderBottom:'1px solid #E4E3E0'}},
+      e('div',{style:{fontSize:14,fontWeight:800,color:'#202C44',fontFamily:"Impact,Arial Black,sans-serif",letterSpacing:'0.02em'}},"LOTELIER"),
+      e('div',{style:{fontSize:10,fontWeight:700,letterSpacing:'0.14em',textTransform:'uppercase',color:'#9E9B97',marginTop:2}},'diario')
+    ),
+    e('div',{onClick:function(){p.setModal(true)},style:{margin:'9px 9px 0',padding:'6px 10px',borderRadius:8,background:p.apiKey?'#EBF7F2':'#FFF3E0',cursor:'pointer',display:'flex',alignItems:'center',gap:7}},
+      e('div',{style:{width:6,height:6,borderRadius:'50%',background:p.apiKey?'#3FB378':'#F59E0B',flexShrink:0}}),
+      e('span',{style:{fontSize:11,fontWeight:600,color:p.apiKey?'#1E6B43':'#C35A00',flex:1}},p.apiKey?'Motor activo':'Configura API key')
+    ),
+    e('div',{style:{padding:'10px 0',flex:1}},
+      nav.map(function(item){
+        var on=p.act===item.id;
+        return e('div',{key:item.id,onClick:function(){p.go(item.id)},style:{display:'flex',alignItems:'center',gap:8,padding:'8px 16px',cursor:'pointer',position:'relative',background:on?'#EBF7F2':'transparent'}},
+          on?e('div',{style:{position:'absolute',left:0,top:0,bottom:0,width:2,background:'#3FB378',borderRadius:'0 2px 2px 0'}}):null,
+          e('span',{style:{fontSize:12,fontWeight:on?600:500,color:on?'#1E6B43':'#6B6966'}},item.l)
+        );
+      })
+    ),
+    e('div',{style:{padding:'12px 16px',borderTop:'1px solid #E4E3E0',display:'flex',alignItems:'center',gap:8}},
+      e('div',{style:{width:28,height:28,borderRadius:'50%',background:'#202C44',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:'#fff',flexShrink:0}},'JG'),
+      e('div',null,e('div',{style:{fontSize:12,fontWeight:600}},'Jorge G.'),e('div',{style:{fontSize:11,color:'#9E9B97'}},'Editor'))
+    )
+  );
+}
+
+/* HOME */
+function Home(p){
+  return e('div',{style:{flex:1,overflow:'auto'}},
+    Top('Home',Btn({ch:'Nueva pieza',v:'pri',sz:'sm',onClick:function(){p.go('nueva')}})),
+    e('div',{style:{padding:'22px 26px',display:'flex',flexDirection:'column',gap:18}},
+      e('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}},
+        [{l:'Piezas',v:p.pieces.length,s:'En biblioteca'},{l:'Listas',v:p.pieces.filter(function(x){return x.status==='ready'}).length,s:'Para publicar',g:true},{l:'Publicadas',v:p.pieces.filter(function(x){return x.status==='pub'}).length,s:'Total'}].map(function(m){
+          return e('div',{key:m.l,style:{background:'#F0EFED',borderRadius:8,padding:14}},
+            e('div',{style:{fontSize:10,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:5}},m.l),
+            e('div',{style:{fontSize:26,fontWeight:800,color:m.g?'#3FB378':'#1A1A1A',lineHeight:1}},m.v),
+            e('div',{style:{fontSize:11,color:'#9E9B97',marginTop:4}},m.s)
+          );
+        })
+      ),
+      e('div',{style:{background:'#202C44',borderRadius:12,padding:'20px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',cursor:'pointer'},onClick:function(){p.go('briefing')}},
+        e('div',null,
+          e('div',{style:{fontSize:13,fontWeight:700,color:'#fff',marginBottom:4}},'Briefing editorial diario'),
+          e('div',{style:{fontSize:12,color:'rgba(255,255,255,0.55)'}},'Hosteltur, Skift, Preferente, Tourinews, Nexotur y mas')
+        ),
+        e('div',{style:{background:'#3FB378',color:'#fff',padding:'8px 16px',borderRadius:8,fontSize:12,fontWeight:700,flexShrink:0,marginLeft:16}},'Abrir')
+      ),
+      p.pieces.length>0?e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,overflow:'hidden'}},
+        e('div',{style:{padding:'11px 14px',borderBottom:'1px solid #E4E3E0',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+          e('span',{style:{fontSize:13,fontWeight:700}},'Recientes'),
+          e('span',{style:{fontSize:11,fontWeight:600,color:'#3FB378',cursor:'pointer'},onClick:function(){p.go('biblioteca')}},'Ver todas')
+        ),
+        p.pieces.slice(0,4).map(function(pc){
+          return e('div',{key:pc.id,style:{padding:'9px 14px',borderBottom:'1px solid #E4E3E0',display:'flex',gap:10,alignItems:'center'}},
+            e('div',{style:{width:36,height:36,borderRadius:5,background:pc.color||'#202C44',flexShrink:0}}),
+            e('div',{style:{flex:1,minWidth:0}},
+              e('div',{style:{fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},pc.analysis&&pc.analysis.titular_editorial||'Sin titulo'),
+              e('div',{style:{fontSize:11,color:'#9E9B97',marginTop:1}},(pc.source||'-')+' - '+(pc.format==='carousel'?'Carrusel':pc.format==='video'?'Video':'Mini'))
+            ),
+            Btn({ch:'Editar',v:'pri',sz:'sm',onClick:function(){p.setPFE(pc);p.go('editor')}})
+          );
+        })
+      ):null
+    )
+  );
+}
+
+/* BRIEFING */
+function Briefing(p){
+  var s1=useState('idle'),state=s1[0],setState=s1[1];
+  var s2=useState([]),items=s2[0],setItems=s2[1];
+  var s3=useState({done:0,total:FUENTES.length}),prog=s3[0],setProg=s3[1];
+  var s4=useState('all'),filter=s4[0],setFilter=s4[1];
+  var s5=useState(''),manualText=s5[0],setManualText=s5[1];
+  var s6=useState(false),procesando=s6[0],setProcesando=s6[1];
+  var s7=useState(''),procErr=s7[0],setProcErr=s7[1];
+
+  useEffect(function(){var c=S.briefing();if(c&&c.length>0){setItems(c);setState('done')}},[]);
+
+  var cargarRSS=function(){
+    setState('loading');setProg({done:0,total:FUENTES.length});
+    var todos=[];
+    var runBatch=function(bi){
+      if(bi>=FUENTES.length){
+        var seen=new Set();
+        var deduped=todos.filter(function(item){
+          var k=item.title.toLowerCase().slice(0,50);
+          if(seen.has(k))return false;seen.add(k);return true;
+        });
+        deduped.sort(function(a,b){try{return new Date(b.pubDate)-new Date(a.pubDate)}catch(x){return 0}});
+        S.saveBriefing(deduped);setItems(deduped);setState(deduped.length>0?'done':'error');return;
+      }
+      var batch=FUENTES.slice(bi,bi+3);
+      Promise.all(batch.map(fetchFuente)).then(function(results){
+        results.forEach(function(r){todos=todos.concat(r)});
+        setProg({done:Math.min(bi+3,FUENTES.length),total:FUENTES.length});
+        runBatch(bi+3);
+      });
+    };
+    runBatch(0);
+  };
+
+  var cargarClaude=function(){
+    if(!p.apiKey){p.setModal(true);return}
+    setState('loading');setProg({done:0,total:1});
+    var hoy=new Date().toLocaleDateString('es-ES',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+    var prompt='Hoy es '+hoy+'. Genera 12 noticias REALES y ACTUALES de turismo y hosteleria. Solo turismo: hoteles, aerolineas, destinos, restauracion, tecnologia hotelera, turismo espanol e internacional. Datos concretos. Titulares ironicos estilo LOTELIER DIARIO.\nJSON sin markdown:\n{"items":[{"title":"titular con dato concreto","description":"2 frases directas con dato clave","source":"medio especializado real","local":false}]}';
+    callClaude(p.apiKey,SYS,prompt)
+      .then(function(raw){
+        var clean=raw.replace(/```[a-z]*\n?|\n?```/g,'').trim();
+        var parsed=JSON.parse(clean);
+        var noticias=(parsed.items||[]).map(function(n,i){return{id:'c'+i,title:n.title,description:n.description,source:n.source||'Hosteltur',local:n.local||false,link:'',pubDate:new Date().toISOString()}});
+        S.saveBriefing(noticias);setItems(noticias);setState('done');
+      })
+      .catch(function(){setState('error')});
+  };
+
+  var procesarManual=function(){
+    if(!manualText.trim()||!p.apiKey){if(!p.apiKey)p.setModal(true);return}
+    setProcesando(true);setProcErr('');
+    var prompt='Extrae noticias de TURISMO Y HOSTELERIA de este texto. Solo turismo. Si no hay noticias de turismo devuelve items vacio.\nJSON sin markdown:\n{"items":[{"title":"titular editorial","description":"resumen 2 frases","source":"fuente o Manual","local":false}]}\nTexto:\n'+manualText.slice(0,3000);
+    callClaude(p.apiKey,SYS,prompt)
+      .then(function(raw){
+        var clean=raw.replace(/```[a-z]*\n?|\n?```/g,'').trim();
+        var parsed=JSON.parse(clean);
+        var nuevas=(parsed.items||[]).map(function(n,i){return{id:'m'+Date.now()+i,title:n.title,description:n.description,source:n.source||'Manual',local:n.local||false,link:'',pubDate:new Date().toISOString()}});
+        if(!nuevas.length){setProcErr('No se encontraron noticias de turismo en el texto.');setProcesando(false);return}
+        var combined=nuevas.concat(items);
+        S.saveBriefing(combined);setItems(combined);setManualText('');setState('done');setProcesando(false);
+      })
+      .catch(function(e){setProcErr('Error: '+e.message);setProcesando(false)});
+  };
+
+  var filtered=filter==='all'?items:items.filter(function(i){return i.local});
+
+  return e('div',{style:{flex:1,overflow:'auto'}},
+    Top('Briefing diario',e('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+      state==='done'?e('span',{style:{fontSize:11,color:'#9E9B97'}},items.length+' noticias de turismo'):null,
+      state==='loading'&&prog.total>1?e('span',{style:{fontSize:11,color:'#3FB378',fontWeight:600}},prog.done+'/'+prog.total+'...'):null,
+      Btn({ch:state==='loading'?'Cargando...':'Cargar RSS',v:'pri',sz:'sm',ld:state==='loading',onClick:cargarRSS}),
+      Btn({ch:'Generar con Claude',v:'sec',sz:'sm',dis:state==='loading'||!p.apiKey,onClick:cargarClaude})
+    )),
+    e('div',{style:{padding:'20px 26px',display:'flex',flexDirection:'column',gap:16}},
+      /* Manual */
+      e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,overflow:'hidden'}},
+        e('div',{style:{padding:'11px 16px',borderBottom:'1px solid #E4E3E0',display:'flex',alignItems:'center',justifyContent:'space-between'}},
+          e('span',{style:{fontSize:13,fontWeight:700}},'Anadir noticia manual'),
+          e('span',{style:{fontSize:11,color:'#9E9B97'}},'Pega texto de turismo y Claude lo estructura')
+        ),
+        e('div',{style:{padding:'13px 16px',display:'flex',gap:10,alignItems:'flex-start'}},
+          e('textarea',{value:manualText,onChange:function(ev){setManualText(ev.target.value);setProcErr('')},placeholder:'Pega aqui el texto de cualquier noticia de turismo...',style:{flex:1,minHeight:80,padding:'9px 12px',border:'1px solid #E4E3E0',borderRadius:8,fontSize:13,lineHeight:1.5,resize:'vertical',outline:'none',background:'#F0EFED'}}),
+          e('div',{style:{display:'flex',flexDirection:'column',gap:6}},
+            Btn({ch:procesando?'Procesando...':'Anadir',v:'navy',sz:'sm',ld:procesando,dis:!manualText.trim()||procesando||!p.apiKey,onClick:procesarManual}),
+            !p.apiKey?Btn({ch:'Config API',v:'sec',sz:'sm',onClick:function(){p.setModal(true)}}):null
+          )
+        ),
+        procErr?e('div',{style:{padding:'0 16px 12px',fontSize:12,color:'#E5484D'}},procErr):null
+      ),
+      /* States */
+      state==='idle'?e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,padding:'36px',textAlign:'center'}},
+        e('div',{style:{fontSize:16,fontWeight:700,color:'#202C44',marginBottom:8}},'Briefing de turismo diario'),
+        e('div',{style:{fontSize:13,color:'#6B6966',marginBottom:22,lineHeight:1.7}},FUENTES.length+' fuentes especializadas: Hosteltur, Skift, Nexotur, Preferente, Travel Weekly y mas'),
+        e('div',{style:{display:'flex',gap:10,justifyContent:'center'}},
+          Btn({ch:'Cargar RSS (noticias reales)',v:'pri',sz:'lg',onClick:cargarRSS}),
+          Btn({ch:'Generar con Claude',v:'sec',sz:'lg',onClick:cargarClaude,dis:!p.apiKey})
+        )
+      ):null,
+      state==='loading'?e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,padding:'36px',textAlign:'center'}},
+        e('div',{style:{width:44,height:44,borderRadius:12,background:'#EBF7F2',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 14px'}},
+          e('svg',{className:'spin',width:22,height:22,viewBox:'0 0 24 24',fill:'none'},e('circle',{cx:12,cy:12,r:10,stroke:'#3FB378',strokeWidth:2.5,strokeDasharray:40,strokeDashoffset:15,strokeLinecap:'round'}))
+        ),
+        e('div',{style:{fontSize:15,fontWeight:700,marginBottom:10}},prog.total>1?'Cargando noticias de turismo...':'Generando con Claude...'),
+        prog.total>1?e('div',{style:{height:5,background:'#F0EFED',borderRadius:3,maxWidth:280,margin:'0 auto'}},e('div',{style:{height:5,background:'#3FB378',borderRadius:3,width:((prog.done/prog.total)*100)+'%',transition:'width .4s'}})):null
+      ):null,
+      state==='error'?e('div',{style:{background:'#FEE2E2',borderRadius:12,padding:'24px',textAlign:'center'}},
+        e('div',{style:{fontSize:13,color:'#B91C1C',marginBottom:12}},'No se pudieron cargar noticias via RSS. Prueba con Claude.'),
+        e('div',{style:{display:'flex',gap:10,justifyContent:'center'}},
+          Btn({ch:'Reintentar RSS',v:'danger',sz:'md',onClick:cargarRSS}),
+          Btn({ch:'Usar Claude',v:'sec',sz:'md',onClick:cargarClaude,dis:!p.apiKey})
+        )
+      ):null,
+      state==='done'&&items.length>0?e('div',null,
+        e('div',{style:{display:'flex',gap:6,marginBottom:12}},
+          [{id:'all',l:'Todas ('+items.length+')'},{id:'local',l:'Local Valencia'}].map(function(f){
+            return e('button',{key:f.id,onClick:function(){setFilter(f.id)},style:{padding:'5px 12px',borderRadius:6,border:'1px solid',fontSize:11,fontWeight:600,cursor:'pointer',borderColor:filter===f.id?'#3FB378':'#E4E3E0',background:filter===f.id?'#EBF7F2':'#fff',color:filter===f.id?'#1E6B43':'#6B6966'}},f.l);
+          })
+        ),
+        e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,overflow:'hidden'}},
+          e('div',{style:{padding:'11px 16px',borderBottom:'1px solid #E4E3E0',background:'#202C44',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+            e('span',{style:{fontSize:13,fontWeight:700,color:'#fff'}},'Noticias de turismo - hoy'),
+            e('span',{style:{fontSize:11,color:'rgba(255,255,255,0.45)'}},filtered.length+' resultados')
+          ),
+          filtered.map(function(item,i){
+            return e('div',{key:item.id||i,style:{padding:'13px 16px',borderBottom:i<filtered.length-1?'1px solid #E4E3E0':'none',display:'flex',gap:12,alignItems:'flex-start',background:item.local?'#F7FFFA':'#fff'}},
+              e('div',{style:{flexShrink:0,minWidth:90}},
+                e('span',{style:{display:'inline-flex',fontSize:9,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',padding:'2px 7px',borderRadius:4,background:item.local?'#EBF7F2':item.cat==='internacional'?'#E8F0FE':'#F0EFED',color:item.local?'#1E6B43':item.cat==='internacional'?'#1A56BB':'#6B6966',whiteSpace:'nowrap'}},item.source)
+              ),
+              e('div',{style:{flex:1}},
+                e('div',{style:{fontSize:13,fontWeight:600,lineHeight:1.45,marginBottom:4,color:'#1A1A1A'}},item.title),
+                item.description?e('div',{style:{fontSize:12,color:'#6B6966',lineHeight:1.5}},item.description):null
+              ),
+              e('div',{style:{flexShrink:0,display:'flex',flexDirection:'column',gap:5}},
+                Btn({ch:'Convertir',v:'pri',sz:'sm',onClick:function(){p.setPre({head:item.title,lead:item.description,source:item.source,url:item.link});p.go('nueva')}}),
+                item.link?e('a',{href:item.link,target:'_blank',rel:'noopener',style:{display:'inline-flex',alignItems:'center',fontSize:10,fontWeight:600,color:'#6B6966',textDecoration:'none',border:'1px solid #C8C6C2',borderRadius:6,padding:'4px 8px',height:27}},'Ver'):null
+              )
+            );
+          })
+        )
+      ):null
+    )
+  );
+}
+
+/* NUEVA PIEZA */
+function Nueva(p){
+  var s1=useState('texto'),tab=s1[0],setTab=s1[1];
+  var s2=useState(p.pre?((p.pre.head||'')+'\n\n'+(p.pre.lead||'')):''  ),text=s2[0],setText=s2[1];
+  var s3=useState(p.pre&&p.pre.source||''),src=s3[0],setSrc=s3[1];
+  var s4=useState('input'),step=s4[0],setStep=s4[1];
+  var s5=useState(null),analysis=s5[0],setAnalysis=s5[1];
+  var s6=useState(''),err=s6[0],setErr=s6[1];
+  var s7=useState(null),piece=s7[0],setPiece=s7[1];
+  var s8=useState(''),stream=s8[0],setStream=s8[1];
+  var s9=useState(null),fmt=s9[0],setFmt=s9[1];
+  var PAL=['#202C44','#38445b','#1a1a1a','#2d3a52','#1E3A2F'];
+
+  useEffect(function(){if(p.pre){setText((p.pre.head||'')+'\n\n'+(p.pre.lead||''));setSrc(p.pre.source||'')}},[p.pre]);
+
+  var analyze=function(){
+    if(!p.apiKey){p.setModal(true);return}
+    if(!text.trim())return;
+    setStep('analyzing');setErr('');
+    var prompt='Analiza esta noticia de turismo/hosteleria. JSON sin markdown:\n{"titular_editorial":"MAYUSCULAS impactante max 8 palabras","subtitulo":"directo max 15 palabras","datos":["cifra o hecho 1","dato 2","dato 3"],"citas":[{"texto":"cita exacta","autor":"nombre cargo"}],"enfoque":"angulo ironico o revelador"}\nSi no hay citas: citas:[]\nTexto:\n'+text.slice(0,3000);
+    callClaude(p.apiKey,SYS,prompt)
+      .then(function(raw){var clean=raw.replace(/```[a-z]*\n?|\n?```/g,'').trim();setAnalysis(JSON.parse(clean));setStep('analyzed')})
+      .catch(function(e){setErr('Error: '+e.message);setStep('input')});
+  };
+
+  var generate=function(format){
+    if(!p.apiKey){p.setModal(true);return}
+    setFmt(format);setStep('generating');setErr('');setStream('');
+    var prompt;
+    if(format==='carousel'){
+      prompt='Carrusel 7 slides Instagram LOTELIER DIARIO. Magazine style. Voz ironica canalla.\nTitular:'+analysis.titular_editorial+' Datos:'+(analysis.datos||[]).join('|')+'\nJSON sin markdown:\n{"slides":[{"numero":1,"tipo":"portada","titular":"max 5 palabras","subtitulo":"golpe directo","acento_verde":"frase impactante max 15 palabras","fuente":"'+src+'"},{"numero":2,"tipo":"dato","numero_destacado":"cifra","contexto":"lo que significa","dato_extra":"dato extra","fuente":"'+src+'"},{"numero":3,"tipo":"texto","titular":"angulo clave","cuerpo":"2-3 frases directas","fuente":"'+src+'"},{"numero":4,"tipo":"cita","cita":"cita o reformulacion","autor":"Nombre Cargo","fuente":"'+src+'"},{"numero":5,"tipo":"dato","numero_destacado":"cifra2","contexto":"contexto","dato_extra":"","fuente":"'+src+'"},{"numero":6,"tipo":"texto","titular":"consecuencia","cuerpo":"2-3 frases remate","fuente":"'+src+'"},{"numero":7,"tipo":"cierre","pregunta":"remate ironico max 10 palabras","fuente":"LOTELIER DIARIO"}]}';
+    } else {
+      prompt='Guion video TikTok LOTELIER DIARIO. Voz ironica canalla. 30-40 seg.\nTitular:'+analysis.titular_editorial+'\nJSON sin markdown:\n{"titulo":"titulo del video","duracion_estimada":"35 segundos","bloques":[{"numero":1,"tipo":"intro","copy":"gancho brutal 2 frases","duracion":"5s"},{"numero":2,"tipo":"contexto","copy":"que esta pasando sin rodeos","duracion":"8s"},{"numero":3,"tipo":"dato","copy":"la cifra mas reveladora","duracion":"6s"},{"numero":4,"tipo":"desarrollo","copy":"angulo que sorprende","duracion":"8s"},{"numero":5,"tipo":"cierre","copy":"remate ironico","duracion":"5s"}],"copy_caption":"caption max 100 chars sin emojis"}';
+    }
+    callClaude(p.apiKey,SYS,prompt,function(t){setStream(t)})
+      .then(function(raw){
+        var clean=raw.replace(/```[a-z]*\n?|\n?```/g,'').trim();
+        var content=JSON.parse(clean);
+        var np={id:Date.now()+'',format:format,source:src,analysis:analysis,content:content,status:'ready',createdAt:new Date().toISOString(),color:PAL[Math.floor(Math.random()*PAL.length)]};
+        S.save(np);p.onSaved(np);setPiece(np);setStep('result');
+      })
+      .catch(function(e){setErr('Error: '+e.message);setStep('analyzed')});
+  };
+
+  return e('div',{style:{flex:1,overflow:'auto'}},
+    Top('Nueva pieza',Btn({ch:'Volver',v:'sec',sz:'sm',onClick:function(){p.go('home')}})),
+    e('div',{style:{maxWidth:650,margin:'0 auto',padding:'24px'}},
+      step==='input'||step==='analyzing'?e('div',null,
+        e('div',{style:{display:'flex',marginBottom:18,borderBottom:'1px solid #E4E3E0'}},
+          ['texto'].map(function(t){return e('button',{key:t,style:{padding:'7px 16px',fontSize:13,fontWeight:700,color:'#3FB378',background:'transparent',border:'none',borderBottom:'2px solid #3FB378',cursor:'pointer',marginBottom:-1}},'Texto')})
+        ),
+        e('div',{style:{marginBottom:13}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#9E9B97',marginBottom:5}},'TEXTO DE LA NOTICIA'),
+          e('textarea',{value:text,onChange:function(ev){setText(ev.target.value)},placeholder:'Pega aqui el texto de la noticia de turismo...',style:{width:'100%',minHeight:160,padding:'10px 12px',border:'1px solid #E4E3E0',borderRadius:8,fontSize:13,lineHeight:1.6,resize:'vertical',outline:'none',background:'#F0EFED'}}),
+          e('div',{style:{fontSize:11,color:'#9E9B97',marginTop:2,textAlign:'right'}},text.length+' chars')
+        ),
+        e('div',{style:{marginBottom:16}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#9E9B97',marginBottom:5}},'FUENTE'),
+          e('input',{value:src,onChange:function(ev){setSrc(ev.target.value)},placeholder:'Hosteltur, Skift...',style:{width:'100%',padding:'0 10px',height:35,border:'1px solid #E4E3E0',borderRadius:7,fontSize:13,outline:'none',background:'#F0EFED'}})
+        ),
+        !p.apiKey?e('div',{style:{background:'#FFF3E0',border:'1px solid #FED7AA',borderRadius:8,padding:'8px 11px',marginBottom:11,display:'flex',alignItems:'center',gap:8,fontSize:12,color:'#C35A00'}},
+          'Configura tu API key de Anthropic primero. ',
+          Btn({ch:'Configurar',v:'sec',sz:'sm',onClick:function(){p.setModal(true)}})
+        ):null,
+        err?e('div',{style:{background:'#FEE2E2',borderRadius:8,padding:'8px 11px',marginBottom:11,fontSize:12,color:'#B91C1C'}},err):null,
+        Btn({ch:step==='analyzing'?'Analizando...':'Analizar con motor editorial',v:'pri',sz:'lg',full:true,onClick:analyze,ld:step==='analyzing',dis:!text.trim()||step==='analyzing'})
+      ):null,
+      step==='analyzed'&&analysis?e('div',null,
+        e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,overflow:'hidden',marginBottom:16}},
+          e('div',{style:{padding:'11px 16px',borderBottom:'1px solid #E4E3E0',display:'flex',alignItems:'center',justifyContent:'space-between',background:'#202C44'}},
+            e('span',{style:{fontSize:13,fontWeight:700,color:'#fff'}},'Analisis editorial'),
+            Btn({ch:'Editar texto',v:'sec',sz:'sm',onClick:function(){setStep('input')}})
+          ),
+          e('div',{style:{padding:'13px 16px',borderBottom:'1px solid #E4E3E0'}},
+            e('div',{style:{fontSize:9,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#9E9B97',marginBottom:5}},'TITULAR EDITORIAL'),
+            e('div',{style:{fontSize:22,fontWeight:900,color:'#202C44',lineHeight:1.1,fontFamily:'Impact,Arial Black,sans-serif',textTransform:'uppercase'}},analysis.titular_editorial),
+            e('div',{style:{fontSize:13,color:'#6B6966',marginTop:6,lineHeight:1.4}},analysis.subtitulo)
+          ),
+          analysis.datos&&analysis.datos.length?e('div',{style:{padding:'11px 16px'}},
+            e('div',{style:{fontSize:9,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#9E9B97',marginBottom:7}},'DATOS CLAVE'),
+            e('div',{style:{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:6}},
+              analysis.datos.map(function(d,i){return e('div',{key:i,style:{background:'#F0EFED',borderRadius:6,padding:'7px 10px',fontSize:12,lineHeight:1.4}},d)})
+            )
+          ):null
+        ),
+        e('div',{style:{fontSize:13,fontWeight:700,marginBottom:10}},'Selecciona el formato'),
+        e('div',{style:{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:12}},
+          [{id:'carousel',l:'Carrusel Magazine',d:'7 slides al estilo LOTELIER - descargables'},
+           {id:'video',l:'Video / Reels',d:'Guion TikTok/Reels - descargable'}].map(function(f){
+            return e('div',{key:f.id,onClick:function(){generate(f.id)},style:{border:'2px solid #E4E3E0',borderRadius:12,padding:'20px 16px',textAlign:'center',cursor:'pointer',background:'#fff',transition:'all .15s'},
+              onMouseOver:function(ev){ev.currentTarget.style.borderColor='#3FB378';ev.currentTarget.style.background='#EBF7F2'},
+              onMouseOut:function(ev){ev.currentTarget.style.borderColor='#E4E3E0';ev.currentTarget.style.background='#fff'}},
+              e('div',{style:{fontSize:15,fontWeight:800,marginBottom:4,color:'#202C44'}},f.l),
+              e('div',{style:{fontSize:12,color:'#9E9B97',lineHeight:1.4}},f.d)
+            );
+          })
+        ),
+        err?e('div',{style:{background:'#FEE2E2',borderRadius:8,padding:'8px 11px',marginTop:10,fontSize:12,color:'#B91C1C'}},err):null
+      ):null,
+      step==='generating'?e('div',{style:{textAlign:'center',padding:'40px 0'}},
+        e('div',{style:{width:50,height:50,borderRadius:13,background:'#EBF7F2',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 16px'}},
+          e('svg',{className:'spin',width:24,height:24,viewBox:'0 0 24 24',fill:'none'},e('circle',{cx:12,cy:12,r:10,stroke:'#3FB378',strokeWidth:2.5,strokeDasharray:40,strokeDashoffset:15,strokeLinecap:'round'}))
+        ),
+        e('h3',{style:{fontSize:17,fontWeight:800,marginBottom:6}},'Generando '+(fmt==='carousel'?'carrusel magazine':'video')+'...'),
+        e('p',{style:{fontSize:13,color:'#6B6966'}},'El motor editorial esta construyendo tu pieza.')
+      ):null,
+      step==='result'&&piece?e('div',{style:{textAlign:'center'}},
+        e('div',{style:{width:50,height:50,borderRadius:13,background:'#EBF7F2',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 16px',fontSize:22,fontWeight:700,color:'#3FB378'}},'OK'),
+        e('h3',{style:{fontSize:18,fontWeight:800,marginBottom:8}},(piece.format==='carousel'?'Carrusel':'Video')+' generado'),
+        e('p',{style:{fontSize:13,color:'#6B6966',marginBottom:20}},'Guardado en tu biblioteca. Ahora puedes editarlo y descargarlo.'),
+        e('div',{style:{display:'flex',gap:8,justifyContent:'center'}},
+          Btn({ch:'Crear otra pieza',v:'sec',sz:'md',onClick:function(){setStep('input');setText('');setAnalysis(null);setPiece(null)}}),
+          Btn({ch:'Abrir en editor',v:'pri',sz:'md',onClick:function(){p.setPFE(piece);p.go('editor')}})
+        )
+      ):null
+    )
+  );
+}
+
+/* EDITOR CARRUSEL - Magazine Style */
+function EdCarrusel(p){
+  var s1=useState(p.piece.content&&p.piece.content.slides||[]),slides=s1[0],setSlides=s1[1];
+  var s2=useState(0),active=s2[0],setActive=s2[1];
+  var s3=useState(false),saved=s3[0],setSaved=s3[1];
+  var s4=useState(null),bgImg=s4[0],setBgImg=s4[1];
+  var s5=useState(false),exporting=s5[0],setExporting=s5[1];
+  var fileRef=useRef(null);
+
+  var sl=slides[active]||{};
+
+  var upd=function(f,v){var ns=slides.slice();ns[active]=Object.assign({},ns[active]);ns[active][f]=v;setSlides(ns);setSaved(false)};
+  var save=function(){var np=Object.assign({},p.piece,{content:Object.assign({},p.piece.content,{slides:slides}),status:'ready'});S.save(np);p.onUpdate(np);setSaved(true);setTimeout(function(){setSaved(false)},2000)};
+
+  var loadImage=function(ev){
+    var file=ev.target.files&&ev.target.files[0];
+    if(!file)return;
+    var reader=new FileReader();
+    reader.onload=function(e2){
+      var img=new Image();
+      img.onload=function(){setBgImg(img)};
+      img.src=e2.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  var exportOne=function(){
+    var cv=renderSlide(sl,active,slides.length,bgImg);
+    var url=cv.toDataURL('image/png',0.96);
+    dlFile(url,'lotelier_slide_'+String(active+1).padStart(2,'0')+'.png');
+    /* Also open in new tab as fallback */
+    var w=window.open('','_blank');
+    if(w){w.document.write('<img src="'+url+'" style="max-width:100%;display:block"><p style="font-family:sans-serif;padding:10px;color:#666">Clic derecho > Guardar imagen como... si no se descargo automaticamente</p>')}
+  };
+
+  var exportAll=function(){
+    setExporting(true);
+    var delay=0;
+    slides.forEach(function(sl2,i){
+      setTimeout(function(){
+        var cv=renderSlide(sl2,i,slides.length,bgImg);
+        var url=cv.toDataURL('image/png',0.96);
+        dlFile(url,'lotelier_slide_'+String(i+1).padStart(2,'0')+'.png');
+        if(i===slides.length-1)setTimeout(function(){setExporting(false)},500);
+      },delay);
+      delay+=700;
+    });
+  };
+
+  var TIPOS=['portada','dato','texto','cita','cierre'];
+  var CAMPOS={portada:['titular','acento_verde','subtitulo'],dato:['numero_destacado','contexto','dato_extra'],texto:['titular','cuerpo'],cita:['cita','autor'],cierre:['pregunta']};
+  var LABELS={titular:'Titular (mayusculas)',subtitulo:'Subtitulo',acento_verde:'Quote / Frase destacada',numero_destacado:'Numero destacado',contexto:'Contexto del dato',dato_extra:'Dato extra',cuerpo:'Cuerpo del texto',cita:'Cita textual',autor:'Autor / Cargo',pregunta:'Remate / Pregunta cierre'};
+
+  /* Live canvas preview */
+  var previewRef=useRef(null);
+  useEffect(function(){
+    if(!previewRef.current)return;
+    var cv=renderSlide(sl,active,slides.length,bgImg);
+    var ctx=previewRef.current.getContext('2d');
+    previewRef.current.width=540;previewRef.current.height=675;
+    ctx.drawImage(cv,0,0,540,675);
+  },[sl,active,slides.length,bgImg]);
+
+  return e('div',{style:{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}},
+    Top('Carrusel Magazine',e('div',{style:{display:'flex',gap:7,alignItems:'center'}},
+      saved?e('span',{style:{fontSize:11,fontWeight:600,color:'#3FB378'}},'Guardado'):null,
+      exporting?e('span',{style:{fontSize:11,fontWeight:600,color:'#9E9B97'}},'Exportando...'):null,
+      Btn({ch:'Biblioteca',v:'sec',sz:'sm',onClick:function(){p.go('biblioteca')}}),
+      Btn({ch:'Guardar',v:'sec',sz:'sm',onClick:save}),
+      Btn({ch:'Exportar este',v:'sec',sz:'sm',onClick:exportOne}),
+      Btn({ch:'Exportar todos',v:'pri',sz:'sm',onClick:exportAll,ld:exporting})
+    )),
+    e('div',{style:{display:'flex',flex:1,overflow:'hidden'}},
+      /* Thumbnails panel */
+      e('div',{style:{width:130,background:'#fff',borderRight:'1px solid #E4E3E0',overflow:'auto',padding:'8px 6px',display:'flex',flexDirection:'column',gap:6,flexShrink:0}},
+        slides.map(function(sl2,i){
+          return e('div',{key:i,onClick:function(){setActive(i)},style:{cursor:'pointer',borderRadius:4,padding:2,border:'2px solid '+(active===i?'#3FB378':'transparent')}},
+            e(SlideThumb,{slide:sl2,idx:i,total:slides.length,size:110,bgImg:bgImg}),
+            e('div',{style:{fontSize:8,fontWeight:600,color:active===i?'#3FB378':'#9E9B97',textAlign:'center',marginTop:2}},'Slide '+(i+1))
+          );
+        })
+      ),
+      /* Canvas preview */
+      e('div',{style:{flex:1,background:'#1a1a1a',display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',padding:'20px',position:'relative'}},
+        e('canvas',{ref:previewRef,style:{borderRadius:6,maxHeight:'100%',maxWidth:'100%',objectFit:'contain',boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}}),
+        /* Image upload overlay */
+        e('div',{style:{position:'absolute',bottom:24,left:'50%',transform:'translateX(-50%)',display:'flex',gap:8}},
+          e('input',{type:'file',accept:'image/*',ref:fileRef,onChange:loadImage,style:{display:'none'}}),
+          Btn({ch:bgImg?'Cambiar foto de fondo':'Subir foto de fondo',v:'navy',sz:'sm',onClick:function(){fileRef.current&&fileRef.current.click()}}),
+          bgImg?Btn({ch:'Quitar foto',v:'ghost',sz:'sm',onClick:function(){setBgImg(null)}}):null
+        )
+      ),
+      /* Edit panel */
+      e('div',{style:{width:280,background:'#fff',borderLeft:'1px solid #E4E3E0',overflow:'auto',padding:'16px',flexShrink:0}},
+        e('div',{style:{fontSize:11,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:12}},'Slide '+(active+1)+' / '+slides.length+' - '+sl.tipo),
+        /* Tipo selector */
+        e('div',{style:{marginBottom:14}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:6}},'TIPO DE SLIDE'),
+          e('div',{style:{display:'flex',flexWrap:'wrap',gap:5}},
+            TIPOS.map(function(t){return e('button',{key:t,onClick:function(){upd('tipo',t)},style:{padding:'4px 9px',borderRadius:6,border:'1px solid',fontSize:11,fontWeight:600,cursor:'pointer',borderColor:sl.tipo===t?'#3FB378':'#E4E3E0',background:sl.tipo===t?'#EBF7F2':'transparent',color:sl.tipo===t?'#1E6B43':'#6B6966'}},t)})
+          )
+        ),
+        /* Fields */
+        (CAMPOS[sl.tipo]||[]).map(function(f){
+          return e('div',{key:f,style:{marginBottom:12}},
+            e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:4}},LABELS[f]||f),
+            f==='cuerpo'||f==='cita'||f==='acento_verde'
+              ?e('textarea',{value:sl[f]||'',onChange:function(ev){upd(f,ev.target.value)},rows:3,style:{width:'100%',padding:'7px 9px',border:'1px solid #E4E3E0',borderRadius:6,fontSize:12,lineHeight:1.5,resize:'vertical',outline:'none',background:'#F0EFED'}})
+              :e('input',{value:sl[f]||'',onChange:function(ev){upd(f,ev.target.value)},style:{width:'100%',padding:'0 9px',height:34,border:'1px solid #E4E3E0',borderRadius:6,fontSize:12,outline:'none',background:'#F0EFED'}})
+          );
+        }),
+        e('div',{style:{marginBottom:12}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:4}},'FUENTE / CREDITO'),
+          e('input',{value:sl.fuente||'',onChange:function(ev){upd('fuente',ev.target.value)},style:{width:'100%',padding:'0 9px',height:34,border:'1px solid #E4E3E0',borderRadius:6,fontSize:12,outline:'none',background:'#F0EFED'}})
+        ),
+        e('div',{style:{borderTop:'1px solid #E4E3E0',paddingTop:12,marginTop:4,display:'flex',gap:6}},
+          Btn({ch:'Anterior',v:'sec',sz:'sm',full:true,dis:active===0,onClick:function(){setActive(function(a){return a-1})}}),
+          Btn({ch:'Siguiente',v:'sec',sz:'sm',full:true,dis:active===slides.length-1,onClick:function(){setActive(function(a){return a+1})}})
+        ),
+        e('div',{style:{marginTop:10}},Btn({ch:'Guardar cambios',v:'pri',sz:'md',full:true,onClick:save}))
+      )
+    )
+  );
+}
+
+/* EDITOR VIDEO */
+function EdVideo(p){
+  var s1=useState(p.piece.content&&p.piece.content.bloques||[]),bloques=s1[0],setBloques=s1[1];
+  var s2=useState(p.piece.content&&p.piece.content.copy_caption||''),cap=s2[0],setCap=s2[1];
+  var s3=useState(0),active=s3[0],setActive=s3[1];
+  var s4=useState(false),saved=s4[0],setSaved=s4[1];
+
+  var upd=function(i,f,v){var nb=bloques.slice();nb[i]=Object.assign({},nb[i]);nb[i][f]=v;setBloques(nb);setSaved(false)};
+  var save=function(){var np=Object.assign({},p.piece,{content:Object.assign({},p.piece.content,{bloques:bloques,copy_caption:cap}),status:'ready'});S.save(np);p.onUpdate(np);setSaved(true);setTimeout(function(){setSaved(false)},2000)};
+
+  var exportScript=function(){
+    var txt='GUION VIDEO - LOTELIER DIARIO\n';
+    txt+='Titular: '+(p.piece.analysis&&p.piece.analysis.titular_editorial||'')+'\n\n';
+    bloques.forEach(function(b){txt+='['+b.tipo.toUpperCase()+' - '+b.duracion+']\n'+b.copy+'\n\n'});
+    txt+='\nCAPTION:\n'+cap;
+    var blob=new Blob([txt],{type:'text/plain'});
+    var url=URL.createObjectURL(blob);
+    dlFile(url,'lotelier_guion_video.txt');
+    URL.revokeObjectURL(url);
+  };
+
+  var b=bloques[active]||{};
+  var TC={intro:'#3FB378',contexto:'#fff',dato:'#3FB378',desarrollo:'#fff',cierre:'#3FB378'};
+
+  return e('div',{style:{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}},
+    Top('Editor Video / Reels',e('div',{style:{display:'flex',gap:7,alignItems:'center'}},
+      saved?e('span',{style:{fontSize:11,fontWeight:600,color:'#3FB378'}},'Guardado'):null,
+      Btn({ch:'Biblioteca',v:'sec',sz:'sm',onClick:function(){p.go('biblioteca')}}),
+      Btn({ch:'Guardar',v:'sec',sz:'sm',onClick:save}),
+      Btn({ch:'Descargar guion TXT',v:'pri',sz:'sm',onClick:exportScript})
+    )),
+    e('div',{style:{display:'flex',flex:1,overflow:'hidden'}},
+      /* Bloques panel */
+      e('div',{style:{width:200,background:'#fff',borderRight:'1px solid #E4E3E0',overflow:'auto',padding:'12px'}},
+        e('div',{style:{fontSize:10,fontWeight:700,color:'#9E9B97',letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:10}},'Bloques del video'),
+        bloques.map(function(bl,i){
+          return e('div',{key:i,onClick:function(){setActive(i)},style:{marginBottom:6,padding:'10px 11px',borderRadius:8,background:active===i?'#EBF7F2':'#F0EFED',border:'1px solid '+(active===i?'#3FB378':'transparent'),cursor:'pointer'}},
+            e('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}},
+              e('span',{style:{fontSize:10,fontWeight:700,color:active===i?'#1E6B43':'#6B6966',textTransform:'uppercase'}},'#'+(i+1)+' '+bl.tipo),
+              e('span',{style:{fontSize:10,color:'#9E9B97',fontWeight:600}},bl.duracion)
+            ),
+            e('div',{style:{fontSize:12,lineHeight:1.35,color:active===i?'#202C44':'#6B6966',overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}},bl.copy)
+          );
+        })
+      ),
+      /* Preview */
+      e('div',{style:{flex:1,background:'#111',display:'flex',alignItems:'center',justifyContent:'center',padding:'28px'}},
+        e('div',{style:{width:200,height:355,background:'#202C44',borderRadius:10,overflow:'hidden',position:'relative',boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}},
+          e('div',{style:{position:'absolute',inset:0,background:'linear-gradient(180deg,rgba(0,0,0,0.3) 0%,rgba(0,0,0,0) 40%,rgba(0,0,0,0.7) 100%)'}}),
+          e('div',{style:{position:'absolute',top:12,left:14,right:14}},
+            e('div',{style:{fontSize:8,fontWeight:800,color:'rgba(255,255,255,0.5)',letterSpacing:'0.1em',textTransform:'uppercase'}},'LOTELIER diario')
+          ),
+          e('div',{style:{position:'absolute',top:'35%',left:14,right:14,transform:'translateY(-50%)'}},
+            e('div',{style:{fontSize:9,fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',color:TC[b.tipo]||'#3FB378',marginBottom:6}},b.tipo),
+            e('div',{style:{fontSize:14,fontWeight:700,color:'#F2EFEA',lineHeight:1.4}},b.copy)
+          ),
+          e('div',{style:{position:'absolute',bottom:0,left:0,right:0,padding:'10px 14px'}},
+            e('div',{style:{height:3,background:'rgba(255,255,255,0.08)',borderRadius:2,marginBottom:5,overflow:'hidden'}},
+              e('div',{style:{height:'100%',background:'#3FB378',borderRadius:2,width:((active+1)/bloques.length*100)+'%',transition:'width .3s'}})
+            ),
+            e('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center'}},
+              e('span',{style:{fontSize:8,color:'rgba(255,255,255,0.4)'}},'Bloque '+(active+1)+' de '+bloques.length),
+              e('span',{style:{fontSize:8,color:'rgba(255,255,255,0.4)'}},b.duracion)
+            )
+          )
+        )
+      ),
+      /* Edit panel */
+      e('div',{style:{width:300,background:'#fff',borderLeft:'1px solid #E4E3E0',overflow:'auto',padding:'16px',flexShrink:0}},
+        e('div',{style:{fontSize:11,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:14}},'Bloque '+(active+1)+' - '+(b.tipo||'')),
+        e('div',{style:{marginBottom:12}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:4}},'COPY (texto en pantalla)'),
+          e('textarea',{value:b.copy||'',onChange:function(ev){upd(active,'copy',ev.target.value)},rows:5,style:{width:'100%',padding:'8px 10px',border:'1px solid #E4E3E0',borderRadius:7,fontSize:13,lineHeight:1.5,resize:'vertical',outline:'none',background:'#F0EFED'}})
+        ),
+        e('div',{style:{marginBottom:12}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:4}},'DURACION'),
+          e('input',{value:b.duracion||'',onChange:function(ev){upd(active,'duracion',ev.target.value)},style:{width:'100%',padding:'0 10px',height:34,border:'1px solid #E4E3E0',borderRadius:6,fontSize:12,outline:'none',background:'#F0EFED'}})
+        ),
+        e('div',{style:{borderTop:'1px solid #F0EFED',paddingTop:12,marginBottom:12}},
+          e('label',{style:{display:'block',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:'#9E9B97',marginBottom:4}},'CAPTION PARA EL POST'),
+          e('textarea',{value:cap,onChange:function(ev){setCap(ev.target.value)},rows:3,style:{width:'100%',padding:'7px 10px',border:'1px solid #E4E3E0',borderRadius:6,fontSize:12,lineHeight:1.5,resize:'vertical',outline:'none',background:'#F0EFED'}})
+        ),
+        e('div',{style:{display:'flex',gap:6,marginBottom:10}},
+          Btn({ch:'Anterior',v:'sec',sz:'sm',full:true,dis:active===0,onClick:function(){setActive(function(a){return a-1})}}),
+          Btn({ch:'Siguiente',v:'sec',sz:'sm',full:true,dis:active===bloques.length-1,onClick:function(){setActive(function(a){return a+1})}})
+        ),
+        Btn({ch:'Guardar cambios',v:'pri',sz:'md',full:true,onClick:save}),
+        e('div',{style:{marginTop:12,padding:'10px 12px',background:'#F0EFED',borderRadius:8,fontSize:11,color:'#6B6966',lineHeight:1.6}},
+          'Para descargar: pulsa "Descargar guion TXT" arriba. El guion completo se guarda como archivo de texto para tu editor de video.'
+        )
+      )
+    )
+  );
+}
+
+/* EDITOR ROUTER */
+function Editor(p){
+  if(!p.piece)return e('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:12}},
+    e('p',{style:{fontSize:13,color:'#9E9B97'}},'Selecciona una pieza desde la biblioteca.'),
+    Btn({ch:'Ir a biblioteca',v:'pri',sz:'md',onClick:function(){p.go('biblioteca')}})
+  );
+  if(p.piece.format==='carousel')return e(EdCarrusel,p);
+  if(p.piece.format==='video')return e(EdVideo,p);
+  return null;
+}
+
+/* BIBLIOTECA */
+function Biblioteca(p){
+  var s1=useState('all'),f=s1[0],setF=s1[1];
+  var s2=useState(''),q=s2[0],setQ=s2[1];
+  var filtered=p.pieces.filter(function(pc){
+    if(f!=='all'&&pc.format!==f)return false;
+    if(q&&!(pc.analysis&&pc.analysis.titular_editorial||'').toLowerCase().includes(q.toLowerCase()))return false;
+    return true;
+  });
+  var FL={carousel:'Carrusel',video:'Video'};
+  return e('div',{style:{flex:1,overflow:'auto'}},
+    Top('Biblioteca',Btn({ch:'Nueva pieza',v:'pri',sz:'sm',onClick:function(){p.go('nueva')}})),
+    e('div',{style:{padding:'20px 26px'}},
+      e('div',{style:{display:'flex',gap:9,marginBottom:16,alignItems:'center'}},
+        e('input',{value:q,onChange:function(ev){setQ(ev.target.value)},placeholder:'Buscar...',style:{flex:1,padding:'0 10px',height:35,border:'1px solid #E4E3E0',borderRadius:8,fontSize:13,outline:'none',background:'#F0EFED'}}),
+        e('div',{style:{display:'flex',gap:5}},
+          [{id:'all',l:'Todos'},{id:'carousel',l:'Carrusel'},{id:'video',l:'Video'}].map(function(fi){
+            return e('button',{key:fi.id,onClick:function(){setF(fi.id)},style:{padding:'5px 10px',borderRadius:6,border:'1px solid',fontSize:11,fontWeight:600,cursor:'pointer',borderColor:f===fi.id?'#3FB378':'#E4E3E0',background:f===fi.id?'#EBF7F2':'transparent',color:f===fi.id?'#1E6B43':'#6B6966'}},fi.l);
+          })
+        )
+      ),
+      filtered.length===0?e('div',{style:{textAlign:'center',padding:'52px 0'}},
+        e('p',{style:{fontSize:13,color:'#9E9B97',marginBottom:16}},p.pieces.length===0?'Sin piezas. Empieza desde el Briefing.':'Sin resultados.'),
+        p.pieces.length===0?Btn({ch:'Ir al Briefing',v:'pri',sz:'md',onClick:function(){p.go('briefing')}}):null
+      ):e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:14}},
+        filtered.map(function(pc){
+          return e('div',{key:pc.id,style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,overflow:'hidden'}},
+            e('div',{style:{height:110,background:pc.color||'#202C44',position:'relative',cursor:'pointer'},onClick:function(){p.setPFE(pc);p.go('editor')}},
+              e('div',{style:{position:'absolute',inset:0,background:'rgba(0,0,0,0.3)'}}),
+              e('div',{style:{position:'absolute',bottom:10,left:12,right:12,fontFamily:'Impact,Arial Black,sans-serif',fontSize:15,fontWeight:900,color:'#fff',lineHeight:1.15,textTransform:'uppercase'}},(pc.analysis&&pc.analysis.titular_editorial||'Sin titulo').slice(0,60)),
+              e('div',{style:{position:'absolute',top:10,right:10}},
+                e('span',{style:{display:'inline-flex',fontSize:9,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',padding:'3px 8px',borderRadius:4,background:'#3FB378',color:'#fff'}},FL[pc.format]||pc.format)
+              )
+            ),
+            e('div',{style:{padding:'10px 12px'}},
+              e('div',{style:{fontSize:11,color:'#9E9B97',marginBottom:10}},new Date(pc.createdAt).toLocaleDateString('es-ES',{day:'numeric',month:'short'})+' - '+(pc.source||'-')),
+              e('div',{style:{display:'flex',gap:7}},
+                Btn({ch:'Editar',v:'pri',sz:'sm',onClick:function(){p.setPFE(pc);p.go('editor')}}),
+                pc.format==='carousel'?Btn({ch:'Exportar slides',v:'sec',sz:'sm',onClick:function(){p.setPFE(pc);p.go('editor')}}):null,
+                e('div',{style:{marginLeft:'auto'}},Btn({ch:'Borrar',v:'ghost',sz:'sm',onClick:function(){if(window.confirm('Borrar esta pieza?')){p.onDelete(pc.id)}}}))
+              )
+            )
+          );
+        })
+      )
+    )
+  );
+}
+
+/* AJUSTES */
+function Ajustes(p){
+  return e('div',{style:{flex:1,overflow:'auto'}},
+    Top('Ajustes',null),
+    e('div',{style:{maxWidth:580,margin:'0 auto',padding:'26px'}},
+      e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,overflow:'hidden',marginBottom:18}},
+        e('div',{style:{padding:'11px 16px',borderBottom:'1px solid #E4E3E0',background:'#202C44'}},e('span',{style:{fontSize:13,fontWeight:700,color:'#fff'}},'API Anthropic')),
+        e('div',{style:{padding:'14px 16px',display:'flex',alignItems:'center',justifyContent:'space-between'}},
+          e('div',null,
+            e('div',{style:{fontSize:13,fontWeight:600}},p.apiKey?'Motor editorial activo':'Sin API key configurada'),
+            e('div',{style:{fontSize:11,color:'#9E9B97',marginTop:2}},p.apiKey?'sk-ant-...'+p.apiKey.slice(-6):'Necesitas una API key de Anthropic (console.anthropic.com)')
+          ),
+          Btn({ch:'Cambiar API key',v:'pri',sz:'sm',onClick:function(){p.setModal(true)}})
+        )
+      ),
+      e('div',{style:{background:'#fff',border:'1px solid #E4E3E0',borderRadius:12,padding:'16px',marginBottom:18}},
+        e('div',{style:{fontSize:13,fontWeight:700,marginBottom:8}},'Fuentes RSS activas'),
+        e('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
+          FUENTES.map(function(f){
+            return e('div',{key:f.name,style:{fontSize:11,fontWeight:600,padding:'3px 9px',background:'#F0EFED',borderRadius:5,color:'#6B6966'}},f.name);
+          })
+        )
+      )
+    )
+  );
+}
+
+/* APP */
+function App(){
+  var s1=useState('home'),act=s1[0],setAct=s1[1];
+  var s2=useState(null),pre=s2[0],setPre=s2[1];
+  var s3=useState(S.key()),apiKey=s3[0],setApiKey=s3[1];
+  var s4=useState(false),modal=s4[0],setModal=s4[1];
+  var s5=useState(S.pieces()),pieces=s5[0],setPieces=s5[1];
+  var s6=useState(null),pfe=s6[0],setPfe=s6[1];
+
+  var go=function(screen){setAct(screen);if(screen!=='nueva')setPre(null)};
+  var onSaved=function(){setPieces(S.pieces())};
+  var onUpdate=function(p2){S.save(p2);setPieces(S.pieces());if(pfe&&pfe.id===p2.id)setPfe(p2)};
+  var onDelete=function(id){S.del(id);setPieces(S.pieces())};
+  var onApiSave=function(k){setApiKey(k);setModal(false)};
+
+  var screen;
+  var sp={go:go,setPre:setPre,apiKey:apiKey,setModal:setModal,pieces:pieces,setPFE:setPfe};
+  if(act==='home')screen=e(Home,sp);
+  else if(act==='briefing')screen=e(Briefing,sp);
+  else if(act==='nueva')screen=e(Nueva,Object.assign({},sp,{pre:pre,onSaved:onSaved}));
+  else if(act==='biblioteca')screen=e(Biblioteca,Object.assign({},sp,{onDelete:onDelete}));
+  else if(act==='editor')screen=e(Editor,{piece:pfe,go:go,onUpdate:onUpdate});
+  else if(act==='ajustes')screen=e(Ajustes,{apiKey:apiKey,setModal:setModal});
+  else screen=e(Home,sp);
+
+  return e('div',null,
+    modal?e(ApiModal,{onSave:onApiSave,onClose:function(){setModal(false)},cur:apiKey}):null,
+    e('div',{style:{display:'flex',minHeight:'100vh',background:'#F7F7F6'}},
+      e(Sidebar,{act:act,go:go,apiKey:apiKey,setModal:setModal,pieces:pieces}),
+      screen
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(e(App,null));
+
+})();
+</script>
+</body>
+</html>
