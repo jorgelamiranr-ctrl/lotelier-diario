@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOTELIER diario</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Barlow+Condensed:wght@700;800;900&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Montserrat,sans-serif;background:#F7F7F6;color:#1A1A1A}
+button,input,textarea{font-family:Montserrat,sans-serif}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-thumb{background:#C8C6C2;border-radius:3px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin .8s linear infinite}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(function() {
+
+var e = React.createElement;
+var useState = React.useState;
+var useEffect = React.useEffect;
+
+/* --- STORAGE --- */
+var S = {
+  key: function() { try { return localStorage.getItem('lo_key') || '' } catch(x) { return '' } },
+  setKey: function(k) { try { localStorage.setItem('lo_key', k) } catch(x) {} },
+  pieces: function() { try { return JSON.parse(localStorage.getItem('lo_pieces') || '[]') } catch(x) { return [] } },
+  save: function(p) {
+    var ps = S.pieces();
+    var i = ps.findIndex(function(x) { return x.id === p.id });
+    if (i >= 0) ps[i] = p; else ps.unshift(p);
+    try { localStorage.setItem('lo_pieces', JSON.stringify(ps)) } catch(x) {}
+  },
+  del: function(id) {
+    try { localStorage.setItem('lo_pieces', JSON.stringify(S.pieces().filter(function(p) { return p.id !== id }))) } catch(x) {}
+  },
+  prefs: function() { try { return JSON.parse(localStorage.getItem('lo_prefs') || '{"tono":"ironico","intensidad":5}') } catch(x) { return {tono:'ironico',intensidad:5} } },
+  setPrefs: function(p) { try { localStorage.setItem('lo_prefs', JSON.stringify(p)) } catch(x) {} },
+  briefing: function() { try { var d = JSON.parse(localStorage.getItem('lo_briefing') || 'null'); if (!d) return null; if ((Date.now() - d.ts) / 3600000 > 6) return null; return d } catch(x) { return null } },
+  saveBriefing: function(d) { try { localStorage.setItem('lo_briefing', JSON.stringify({items: d, ts: Date.now()})) } catch(x) {} }
+};
+
+/* --- API --- */
+var callClaude = function(k, sys, user, onStream) {
+  return fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': k,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-5',
+      max_tokens: 2000,
+      stream: !!onStream,
+      system: sys,
+      messages: [{ role: 'user', content: user }]
+    })
+  }).then(function(r) {
+    if (!r.ok) return r.json().then(function(e) { throw new Error(e.error && e.error.message || 'Error API') });
+    if (onStream) {
+      var rd = r.body.getReader(), dc = new TextDecoder(), full = '';
+      var read = function() {
+        return rd.read().then(function(x) {
+          if (x.done) return full;
+          var lines = dc.decode(x.value).split('\n').filter(function(l) { return l.startsWith('data: ') });
+          lines.forEach(function(l) {
+            try { var d = JSON.parse(l.slice(6)); if (d.delta && d.delta.text) { full += d.delta.text; onStream(full) } } catch(e) {}
+          });
+          return read();
+        });
+      };
+      return read();
+    }
+    return r.json().then(function(d) { return d.content[0].text });
+  });
+};
+
+var SYS = "Eres el motor editorial de LOTELIER DIARIO. Voz ironica, canalla, directa. SOLO JSON valido sin markdown ni backticks.";
+
+/* --- RSS --- */
+var RSS_KEY = 'r5lnkpqr4qbcnykfsifl0ofd7jiwcl5f2nj0aumz';
+var FUENTES = [
+  {name:'Hosteltur', url:'https://www.hosteltur.com/rss-hosteltur', local:false},
+  {name:'Preferente', url:'https://www.preferente.com/feed', local:false},
+  {name:'Tourinews', url:'https://www.tourinews.es/feed', local:false},
+  {name:'Skift', url:'https://skift.com/feed', local:false},
+  {name:'Phocuswire', url:'https://www.phocuswire.com/rss', local:false},
+  {name:'TTG Media', url:'https://www.ttgmedia.com/rss.xml', local:false},
+  {name:'Europa Press', url:'https://www.europapress.es/rss/rss.aspx?ch=00071', local:false},
+  {name:'Valencia Plaza', url:'https://valenciaplaza.com/feed', local:true},
+  {name:'Levante-EMV', url:'https://www.levante-emv.com/rss/2.0/', local:true},
+  {name:'Las Provincias', url:'https://www.lasprovincias.es/rss/2.0/', local:true}
+];
+
+var fetchFuente = function(f) {
+  var url = 'https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(f.url) + '&count=5&api_key=' + RSS_KEY;
+  return fetch(url, {signal: AbortSignal.timeout(10000)})
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.items || !d.items.length) return [];
+      return d.items.map(function(item) {
+        return {
+          id: Math.random().toString(36).slice(2, 10),
+          title: (item.title || '').trim(),
+          description: (item.description || '').replace(/<[^>]+>/g, '').trim().slice(0, 200),
+          link: item.link || '',
+          pubDate: item.pubDate || '',
+          source: f.name,
+          local: f.local
+        };
+      }).filter(function(i) { return i.title.length > 10 });
+    })
+    .catch(function() { return [] });
+};
+
+/* --- SHARED COMPONENTS --- */
+var Btn = function(props) {
+  var colors = {
+    pri: {bg:'#3FB378', color:'#fff', border:'none'},
+    sec: {bg:'transparent', color:'#6B6966', border:'1px solid #C8C6C2'},
+    navy: {bg:'#202C44', color:'#fff', border:'none'},
+    danger: {bg:'#E5484D', color:'#fff', border:'none'},
+    ghost: {bg:'transparent', color:'#9E9B97', border:'none'}
+  };
+  var sizes = {
+    sm: {fontSize:11, padding:'0 11px', height:29, borderRadius:6},
+    md: {fontSize:12, padding:'0 15px', height:35, borderRadius:8},
+    lg: {fontSize:13, padding:'0 20px', height:42, borderRadius:8}
+  };
+  var c = colors[props.v || 'pri'];
+  var s = sizes[props.sz || 'md'];
+  var disabled = props.dis || props.ld;
+  return e('button', {
+    onClick: props.onClick,
+    disabled: disabled,
+    style: Object.assign({}, s, c, {
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      gap: 6, fontWeight: 700, letterSpacing: '0.02em',
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      opacity: disabled ? 0.45 : 1, transition: 'all .12s',
+      whiteSpace: 'nowrap', width: props.full ? '100%' : 'auto'
+    })
+  },
+    props.ld ? e('svg', {className:'spin', width:13, height:13, viewBox:'0 0 24 24', fill:'none'},
+      e('circle', {cx:12, cy:12, r:10, stroke:'currentColor', strokeWidth:3, strokeDasharray:40, strokeDashoffset:15, strokeLinecap:'round'})
+    ) : null,
+    props.ch
+  );
+};
+
+var Top = function(title, actions) {
+  return e('div', {style:{background:'#fff', borderBottom:'1px solid #E4E3E0', padding:'0 26px', height:52, display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0}},
+    e('div', {style:{fontSize:15, fontWeight:700}}, title),
+    e('div', {style:{display:'flex', gap:8, alignItems:'center'}}, actions)
+  );
+};
+
+var Badge = function(text, variant) {
+  var colors = {
+    def: {bg:'#F0EFED', c:'#6B6966'},
+    ready: {bg:'#EBF7F2', c:'#1E6B43'},
+    pub: {bg:'#E8F0FE', c:'#1A56BB'},
+    loc: {bg:'#EBF7F2', c:'#1E6B43'},
+    warn: {bg:'#FFF3E0', c:'#C35A00'}
+  };
+  var cl = colors[variant || 'def'] || colors.def;
+  return e('span', {style:{display:'inline-flex', alignItems:'center', fontSize:9, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', padding:'2px 7px', borderRadius:4, background:cl.bg, color:cl.c, whiteSpace:'nowrap'}}, text);
+};
+
+/* --- API KEY MODAL --- */
+function ApiModal(props) {
+  var s1 = useState(props.cur || ''), k = s1[0], setK = s1[1];
+  var s2 = useState(false), testing = s2[0], setTesting = s2[1];
+  var s3 = useState(null), res = s3[0], setRes = s3[1];
+
+  var test = function() {
+    if (!k.startsWith('sk-ant-')) { setRes('err'); return; }
+    setTesting(true); setRes(null);
+    callClaude(k, 'Di OK', 'test')
+      .then(function() { setRes('ok'); })
+      .catch(function() { setRes('err'); })
+      .then(function() { setTesting(false); });
+  };
+
+  return e('div', {style:{position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:999}},
+    e('div', {style:{background:'#fff', borderRadius:16, padding:26, width:420, maxWidth:'90vw'}},
+      e('div', {style:{fontSize:15, fontWeight:800, marginBottom:4}}, 'API Anthropic'),
+      e('div', {style:{fontSize:11, color:'#9E9B97', marginBottom:14}}, 'Motor editorial LOTELIER'),
+      e('div', {style:{background:'#EBF7F2', borderRadius:8, padding:'8px 11px', marginBottom:12, fontSize:11, color:'#1E6B43', lineHeight:1.6}},
+        'Tu key va directa a Anthropic. No pasa por ningun servidor.'),
+      e('label', {style:{display:'block', fontSize:10, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#9E9B97', marginBottom:5}}, 'API KEY'),
+      e('input', {
+        type:'password', value:k,
+        onChange: function(ev) { setK(ev.target.value); setRes(null); },
+        placeholder:'sk-ant-api03-...',
+        style:{width:'100%', padding:'0 12px', height:40, border:'1px solid #E4E3E0', borderRadius:8, fontSize:13, outline:'none', background:'#F7F7F6', fontFamily:'monospace', marginBottom:10}
+      }),
+      e('div', {style:{background:'#F0EFED', borderRadius:8, padding:'8px 11px', marginBottom:12, fontSize:11, color:'#6B6966', lineHeight:1.5}},
+        'Sin key: console.anthropic.com -> Sign up -> API Keys -> Create'),
+      res === 'ok' ? e('div', {style:{background:'#EBF7F2', borderRadius:8, padding:'8px 11px', marginBottom:10, fontSize:12, fontWeight:600, color:'#1E6B43'}}, 'Conexion correcta') : null,
+      res === 'err' ? e('div', {style:{background:'#FEE2E2', borderRadius:8, padding:'8px 11px', marginBottom:10, fontSize:12, fontWeight:600, color:'#B91C1C'}}, 'API key incorrecta o sin creditos') : null,
+      e('div', {style:{display:'flex', gap:8}},
+        Btn({ch:'Cancelar', v:'sec', sz:'md', onClick:props.onClose, full:true}),
+        Btn({ch:testing ? 'Probando...' : 'Probar', v:'sec', sz:'md', onClick:test, ld:testing, full:true}),
+        Btn({ch:'Guardar', v:'pri', sz:'md', onClick:function() { S.setKey(k); props.onSave(k); }, dis:!k, full:true})
+      )
+    )
+  );
+}
+
+/* --- SIDEBAR --- */
+function Sidebar(props) {
+  var nav = [
+    {id:'home', l:'Home'},
+    {id:'briefing', l:'Briefing diario'},
+    {id:'nueva', l:'Nueva pieza'},
+    {id:'biblioteca', l:'Biblioteca'},
+    {id:'ajustes', l:'Ajustes'}
+  ];
+  return e('div', {style:{width:210, background:'#fff', borderRight:'1px solid #E4E3E0', display:'flex', flexDirection:'column', flexShrink:0, minHeight:'100vh'}},
+    e('div', {style:{padding:'16px 16px 12px', borderBottom:'1px solid #E4E3E0'}},
+      e('div', {style:{fontSize:14, fontWeight:800, color:'#202C44'}}, "LOTELIER diario"),
+      e('div', {style:{fontSize:9, fontWeight:700, letterSpacing:'0.14em', textTransform:'uppercase', color:'#9E9B97', marginTop:3}}, 'Tourism & Lifestyle')
+    ),
+    e('div', {
+      onClick: function() { props.setModal(true); },
+      style:{margin:'9px 9px 0', padding:'6px 10px', borderRadius:8, background:props.apiKey ? '#EBF7F2' : '#FFF3E0', cursor:'pointer', display:'flex', alignItems:'center', gap:7}
+    },
+      e('div', {style:{width:6, height:6, borderRadius:'50%', background:props.apiKey ? '#3FB378' : '#F59E0B', flexShrink:0}}),
+      e('span', {style:{fontSize:11, fontWeight:600, color:props.apiKey ? '#1E6B43' : '#C35A00', flex:1}}, props.apiKey ? 'Motor activo' : 'Configura API key')
+    ),
+    e('div', {style:{padding:'10px 0', flex:1}},
+      nav.map(function(item) {
+        var on = props.act === item.id;
+        return e('div', {
+          key: item.id,
+          onClick: function() { props.go(item.id); },
+          style:{display:'flex', alignItems:'center', gap:8, padding:'8px 16px', cursor:'pointer', position:'relative', background:on ? '#EBF7F2' : 'transparent'}
+        },
+          on ? e('div', {style:{position:'absolute', left:0, top:0, bottom:0, width:2, background:'#3FB378', borderRadius:'0 2px 2px 0'}}) : null,
+          e('span', {style:{fontSize:12, fontWeight:on ? 600 : 500, color:on ? '#1E6B43' : '#6B6966'}}, item.l)
+        );
+      })
+    ),
+    e('div', {style:{padding:'12px 16px', borderTop:'1px solid #E4E3E0', display:'flex', alignItems:'center', gap:8}},
+      e('div', {style:{width:28, height:28, borderRadius:'50%', background:'#202C44', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:700, color:'#fff', flexShrink:0}}, 'JG'),
+      e('div', null,
+        e('div', {style:{fontSize:12, fontWeight:600}}, 'Jorge G.'),
+        e('div', {style:{fontSize:11, color:'#9E9B97'}}, 'Editor')
+      )
+    )
+  );
+}
+
+/* --- HOME --- */
+function Home(props) {
+  return e('div', {style:{flex:1, overflow:'auto'}},
+    Top('Home', Btn({ch:'Nueva pieza', v:'pri', sz:'sm', onClick:function() { props.go('nueva'); }})),
+    e('div', {style:{padding:'22px 26px', display:'flex', flexDirection:'column', gap:18}},
+      e('div', {style:{display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:10}},
+        ['Piezas', 'Listas', 'Publicadas', 'Fuentes'].map(function(label, i) {
+          var vals = [props.pieces.length, props.pieces.filter(function(p){return p.status==='ready'}).length, props.pieces.filter(function(p){return p.status==='pub'}).length, FUENTES.length];
+          var subs = ['En biblioteca','Para publicar','Total','RSS activos'];
+          return e('div', {key:label, style:{background:'#F0EFED', borderRadius:8, padding:14}},
+            e('div', {style:{fontSize:10, fontWeight:600, letterSpacing:'0.08em', textTransform:'uppercase', color:'#9E9B97', marginBottom:5}}, label),
+            e('div', {style:{fontSize:26, fontWeight:800, color:i===1?'#3FB378':'#1A1A1A', lineHeight:1}}, vals[i]),
+            e('div', {style:{fontSize:11, color:'#9E9B97', marginTop:4}}, subs[i])
+          );
+        })
+      ),
+      e('div', {style:{background:'#202C44', borderRadius:12, padding:'20px 22px', display:'flex', alignItems:'center', justifyContent:'space-between', cursor:'pointer'}, onClick:function(){props.go('briefing')}},
+        e('div', null,
+          e('div', {style:{fontSize:13, fontWeight:700, color:'#fff', marginBottom:4}}, 'Briefing editorial diario'),
+          e('div', {style:{fontSize:12, color:'rgba(255,255,255,0.55)'}}, 'Noticias reales de Hosteltur, Skift, Valencia Plaza y mas')
+        ),
+        e('div', {style:{background:'#3FB378', color:'#fff', padding:'8px 16px', borderRadius:8, fontSize:12, fontWeight:700, flexShrink:0, marginLeft:16}}, 'Abrir')
+      ),
+      props.pieces.length > 0 ? e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, overflow:'hidden'}},
+        e('div', {style:{padding:'11px 14px', borderBottom:'1px solid #E4E3E0', display:'flex', alignItems:'center', justifyContent:'space-between'}},
+          e('span', {style:{fontSize:13, fontWeight:700}}, 'Recientes'),
+          e('span', {style:{fontSize:11, fontWeight:600, color:'#3FB378', cursor:'pointer'}, onClick:function(){props.go('biblioteca')}}, 'Ver todas')
+        ),
+        props.pieces.slice(0, 5).map(function(p) {
+          return e('div', {key:p.id, style:{padding:'9px 14px', borderBottom:'1px solid #E4E3E0', display:'flex', gap:10, alignItems:'center'}},
+            e('div', {style:{width:36, height:36, borderRadius:5, background:p.color||'#202C44', flexShrink:0}}),
+            e('div', {style:{flex:1, minWidth:0}},
+              e('div', {style:{fontSize:12, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}, p.analysis&&p.analysis.titular_editorial||'Sin titulo'),
+              e('div', {style:{fontSize:11, color:'#9E9B97', marginTop:1}}, (p.source||'-') + ' - ' + p.format)
+            ),
+            Badge(p.status==='ready'?'Listo':p.status==='pub'?'Pub.':'Borrador', p.status==='ready'?'ready':p.status==='pub'?'pub':'def')
+          );
+        })
+      ) : null
+    )
+  );
+}
+
+/* --- BRIEFING --- */
+function Briefing(props) {
+  var s1 = useState('idle'), state = s1[0], setState = s1[1];
+  var s2 = useState([]), items = s2[0], setItems = s2[1];
+  var s3 = useState({done:0,total:FUENTES.length}), prog = s3[0], setProg = s3[1];
+  var s4 = useState('all'), filter = s4[0], setFilter = s4[1];
+  var s5 = useState(''), manualText = s5[0], setManualText = s5[1];
+  var s6 = useState(false), procesando = s6[0], setProcesando = s6[1];
+
+  useEffect(function() {
+    var c = S.briefing();
+    if (c && c.length > 0) { setItems(c); setState('done'); }
+  }, []);
+
+  var cargarRSS = function() {
+    setState('loading'); setProg({done:0, total:FUENTES.length});
+    var todos = [];
+    var runBatch = function(bi) {
+      if (bi >= FUENTES.length) {
+        var seen = new Set();
+        var deduped = todos.filter(function(item) {
+          var k = item.title.toLowerCase().slice(0, 50);
+          if (seen.has(k)) return false; seen.add(k); return true;
+        });
+        deduped.sort(function(a, b) { try { return new Date(b.pubDate) - new Date(a.pubDate) } catch(x) { return 0 } });
+        S.saveBriefing(deduped);
+        setItems(deduped); setState('done'); return;
+      }
+      var batch = FUENTES.slice(bi, bi + 3);
+      Promise.all(batch.map(fetchFuente)).then(function(results) {
+        results.forEach(function(r) { todos = todos.concat(r); });
+        setProg({done: Math.min(bi + 3, FUENTES.length), total: FUENTES.length});
+        runBatch(bi + 3);
+      });
+    };
+    runBatch(0);
+  };
+
+  var cargarClaude = function() {
+    if (!props.apiKey) { props.setModal(true); return; }
+    setState('loading'); setProg({done:0, total:1});
+    var prompt = 'Genera un briefing con 12 noticias relevantes de hoy sobre turismo y hosteleria en Espana, con foco en Valencia. Datos concretos. Angulo ironico y directo.\nJSON: {"items":[{"title":"titular directo","description":"2 frases con dato clave","source":"medio del sector","local":false}]}';
+    callClaude(props.apiKey, SYS, prompt)
+      .then(function(raw) {
+        var clean = raw.replace(/```[a-z]*\n?|\n?```/g, '').trim();
+        var parsed = JSON.parse(clean);
+        var noticias = (parsed.items || []).map(function(n, i) {
+          return {id:'c'+i, title:n.title, description:n.description, source:n.source||'Hosteltur', local:n.local||false, link:'', pubDate:new Date().toISOString()};
+        });
+        S.saveBriefing(noticias); setItems(noticias); setState('done');
+      })
+      .catch(function() { setState('error'); });
+  };
+
+  var procesarManual = function() {
+    if (!manualText.trim()) return;
+    if (!props.apiKey) { props.setModal(true); return; }
+    setProcesando(true);
+    var prompt = 'Extrae y estructura las noticias de este texto. JSON: {"items":[{"title":"titular editorial","description":"resumen 2 frases","source":"fuente si se menciona","local":false}]}\nTexto:\n' + manualText.slice(0, 3000);
+    callClaude(props.apiKey, SYS, prompt)
+      .then(function(raw) {
+        var clean = raw.replace(/```[a-z]*\n?|\n?```/g, '').trim();
+        var parsed = JSON.parse(clean);
+        var nuevas = (parsed.items || []).map(function(n, i) {
+          return {id:'m'+Date.now()+i, title:n.title, description:n.description, source:n.source||'Manual', local:n.local||false, link:'', pubDate:new Date().toISOString()};
+        });
+        var combined = nuevas.concat(items);
+        S.saveBriefing(combined); setItems(combined); setManualText(''); setProcesando(false);
+      })
+      .catch(function() { setProcesando(false); });
+  };
+
+  var filtered = filter === 'all' ? items : filter === 'local' ? items.filter(function(i){return i.local}) : items;
+
+  return e('div', {style:{flex:1, overflow:'auto'}},
+    Top('Briefing diario', e('div', {style:{display:'flex', gap:8, alignItems:'center'}},
+      state === 'done' ? e('span', {style:{fontSize:11, color:'#9E9B97'}}, items.length + ' noticias') : null,
+      state === 'loading' && prog.total > 1 ? e('span', {style:{fontSize:11, color:'#3FB378', fontWeight:600}}, prog.done + '/' + prog.total + '...') : null,
+      Btn({ch: state==='loading' ? 'Cargando...' : 'RSS', v:'pri', sz:'sm', ld:state==='loading', onClick:cargarRSS}),
+      Btn({ch:'Claude', v:'sec', sz:'sm', dis:state==='loading'||!props.apiKey, onClick:cargarClaude})
+    )),
+    e('div', {style:{padding:'20px 26px', display:'flex', flexDirection:'column', gap:16}},
+      e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, overflow:'hidden'}},
+        e('div', {style:{padding:'11px 16px', borderBottom:'1px solid #E4E3E0', display:'flex', alignItems:'center', justifyContent:'space-between'}},
+          e('span', {style:{fontSize:13, fontWeight:700}}, 'Anadir noticia manual'),
+          e('span', {style:{fontSize:11, color:'#9E9B97'}}, 'Pega cualquier texto y Claude lo procesa')
+        ),
+        e('div', {style:{padding:'13px 16px', display:'flex', gap:10, alignItems:'flex-start'}},
+          e('textarea', {
+            value: manualText,
+            onChange: function(ev) { setManualText(ev.target.value); },
+            placeholder: 'Pega aqui el texto de cualquier noticia...',
+            style:{flex:1, minHeight:70, padding:'9px 12px', border:'1px solid #E4E3E0', borderRadius:8, fontSize:13, lineHeight:1.5, resize:'vertical', outline:'none', background:'#F0EFED'}
+          }),
+          Btn({ch:procesando?'Procesando...':'Anadir', v:'navy', sz:'sm', ld:procesando, dis:!manualText.trim()||procesando, onClick:procesarManual})
+        )
+      ),
+      state === 'idle' ? e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, padding:'36px', textAlign:'center'}},
+        e('div', {style:{fontSize:16, fontWeight:700, color:'#202C44', marginBottom:8}}, 'Briefing editorial diario'),
+        e('div', {style:{fontSize:13, color:'#6B6966', marginBottom:22, lineHeight:1.7}}, FUENTES.length + ' fuentes: Hosteltur, Skift, Valencia Plaza, Preferente y mas'),
+        e('div', {style:{display:'flex', gap:10, justifyContent:'center'}},
+          Btn({ch:'Cargar RSS', v:'pri', sz:'lg', onClick:cargarRSS}),
+          Btn({ch:'Generar con Claude', v:'sec', sz:'lg', onClick:cargarClaude, dis:!props.apiKey})
+        )
+      ) : null,
+      state === 'loading' ? e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, padding:'36px', textAlign:'center'}},
+        e('div', {style:{width:44, height:44, borderRadius:12, background:'#EBF7F2', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 14px'}},
+          e('svg', {className:'spin', width:22, height:22, viewBox:'0 0 24 24', fill:'none'},
+            e('circle', {cx:12, cy:12, r:10, stroke:'#3FB378', strokeWidth:2.5, strokeDasharray:40, strokeDashoffset:15, strokeLinecap:'round'})
+          )
+        ),
+        e('div', {style:{fontSize:15, fontWeight:700, marginBottom:10}}, prog.total > 1 ? ('Leyendo ' + FUENTES.length + ' medios...') : 'Generando con Claude...'),
+        prog.total > 1 ? e('div', {style:{height:5, background:'#F0EFED', borderRadius:3, maxWidth:280, margin:'0 auto 8px'}},
+          e('div', {style:{height:5, background:'#3FB378', borderRadius:3, width:((prog.done/prog.total)*100)+'%', transition:'width .4s'}})
+        ) : null
+      ) : null,
+      state === 'error' ? e('div', {style:{background:'#FEE2E2', borderRadius:12, padding:'24px', textAlign:'center'}},
+        e('div', {style:{fontSize:13, color:'#B91C1C', marginBottom:12}}, 'Error al cargar. Reintenta o usa el modo Claude.'),
+        e('div', {style:{display:'flex', gap:10, justifyContent:'center'}},
+          Btn({ch:'Reintentar RSS', v:'danger', sz:'md', onClick:cargarRSS}),
+          Btn({ch:'Usar Claude', v:'sec', sz:'md', onClick:cargarClaude, dis:!props.apiKey})
+        )
+      ) : null,
+      state === 'done' && items.length > 0 ? e('div', null,
+        e('div', {style:{display:'flex', gap:6, marginBottom:12}},
+          [{id:'all',l:'Todas'},{id:'local',l:'Local Valencia'}].map(function(f) {
+            return e('button', {key:f.id, onClick:function(){setFilter(f.id)}, style:{padding:'5px 12px', borderRadius:6, border:'1px solid', fontSize:11, fontWeight:600, cursor:'pointer', borderColor:filter===f.id?'#3FB378':'#E4E3E0', background:filter===f.id?'#EBF7F2':'#fff', color:filter===f.id?'#1E6B43':'#6B6966'}}, f.l);
+          })
+        ),
+        e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, overflow:'hidden'}},
+          e('div', {style:{padding:'11px 16px', borderBottom:'1px solid #E4E3E0', background:'#202C44', display:'flex', alignItems:'center', justifyContent:'space-between'}},
+            e('span', {style:{fontSize:13, fontWeight:700, color:'#fff'}}, 'Noticias de hoy'),
+            e('span', {style:{fontSize:11, color:'rgba(255,255,255,0.45)'}}, filtered.length + ' resultados')
+          ),
+          filtered.map(function(item, i) {
+            return e('div', {key:item.id||i, style:{padding:'13px 16px', borderBottom:i<filtered.length-1?'1px solid #E4E3E0':'none', display:'flex', gap:12, alignItems:'flex-start', background:item.local?'#F7FFFA':'#fff'}},
+              e('div', {style:{flexShrink:0, width:88}}, Badge(item.source, item.local?'loc':'def')),
+              e('div', {style:{flex:1}},
+                e('div', {style:{fontSize:13, fontWeight:600, lineHeight:1.45, marginBottom:4, color:'#1A1A1A'}}, item.title),
+                item.description ? e('div', {style:{fontSize:12, color:'#6B6966', lineHeight:1.5}}, item.description) : null
+              ),
+              e('div', {style:{flexShrink:0, display:'flex', flexDirection:'column', gap:5}},
+                Btn({ch:'Convertir', v:'pri', sz:'sm', onClick:function() {
+                  props.setPre({head:item.title, lead:item.description, source:item.source, url:item.link});
+                  props.go('nueva');
+                }}),
+                item.link ? e('a', {href:item.link, target:'_blank', rel:'noopener', style:{display:'inline-flex', alignItems:'center', fontSize:10, fontWeight:600, color:'#6B6966', textDecoration:'none', border:'1px solid #C8C6C2', borderRadius:6, padding:'4px 8px', height:27}}, 'Ver') : null
+              )
+            );
+          })
+        )
+      ) : null
+    )
+  );
+}
+
+/* --- NUEVA PIEZA --- */
+function Nueva(props) {
+  var s1 = useState('texto'), tab = s1[0], setTab = s1[1];
+  var s2 = useState(props.pre ? ((props.pre.head||'') + '\n\n' + (props.pre.lead||'')) : ''), text = s2[0], setText = s2[1];
+  var s3 = useState(props.pre&&props.pre.source||''), src = s3[0], setSrc = s3[1];
+  var s4 = useState('input'), step = s4[0], setStep = s4[1];
+  var s5 = useState(null), analysis = s5[0], setAnalysis = s5[1];
+  var s6 = useState(''), err = s6[0], setErr = s6[1];
+  var s7 = useState(null), piece = s7[0], setPiece = s7[1];
+  var s8 = useState(''), stream = s8[0], setStream = s8[1];
+  var s9 = useState(null), fmt = s9[0], setFmt = s9[1];
+  var PAL = ['#202C44','#38445b','#1a1a1a','#2d3a52','#1E3A2F'];
+
+  useEffect(function() {
+    if (props.pre) {
+      setText((props.pre.head||'') + '\n\n' + (props.pre.lead||''));
+      setSrc(props.pre.source||'');
+    }
+  }, [props.pre]);
+
+  var analyze = function() {
+    if (!props.apiKey) { props.setModal(true); return; }
+    if (!text.trim()) return;
+    setStep('analyzing'); setErr('');
+    var prompt = 'Analiza este texto y devuelve JSON: {"titular_editorial":"MAYUSCULAS contundente max 8 palabras","subtitulo":"max 15 palabras","datos":["dato cifra","dato 2"],"citas":[{"texto":"cita exacta","autor":"nombre"}],"enfoque":"angulo central"}\nSi no hay citas: citas:[]. Texto: ' + text.slice(0, 3000);
+    callClaude(props.apiKey, SYS, prompt)
+      .then(function(raw) {
+        var clean = raw.replace(/```[a-z]*\n?|\n?```/g, '').trim();
+        setAnalysis(JSON.parse(clean)); setStep('analyzed');
+      })
+      .catch(function(e) { setErr('Error: ' + e.message); setStep('input'); });
+  };
+
+  var generate = function(format) {
+    if (!props.apiKey) { props.setModal(true); return; }
+    setFmt(format); setStep('generating'); setErr(''); setStream('');
+    var prompt;
+    if (format === 'carousel') {
+      prompt = 'Carrusel 7 slides Instagram LOTELIER DIARIO. Voz ironica canalla directa. Titular:' + analysis.titular_editorial + ' Datos:' + (analysis.datos||[]).join('|') + '\nJSON: {"slides":[{"numero":1,"tipo":"portada","titular":"max 5 palabras","subtitulo":"max 12 palabras","acento_verde":"1 palabra"},{"numero":2,"tipo":"dato","numero_destacado":"cifra","contexto":"frase","dato_extra":"dato"},{"numero":3,"tipo":"texto","titular":"idea","cuerpo":"2-3 frases"},{"numero":4,"tipo":"cita","cita":"cita","autor":"Nombre Cargo"},{"numero":5,"tipo":"dato","numero_destacado":"cifra2","contexto":"frase","dato_extra":"dato"},{"numero":6,"tipo":"texto","titular":"consecuencia","cuerpo":"2-3 frases"},{"numero":7,"tipo":"cierre","pregunta":"remate 10 palabras","fuente":"LOTELIER DIARIO"}]}';
+    } else if (format === 'video') {
+      prompt = 'Guion video TikTok LOTELIER DIARIO. Voz ironica canalla. Titular:' + analysis.titular_editorial + '\nJSON: {"titulo":"...","duracion_estimada":"35s","bloques":[{"numero":1,"tipo":"intro","copy":"gancho","duracion":"5s"},{"numero":2,"tipo":"contexto","copy":"que paso","duracion":"8s"},{"numero":3,"tipo":"dato","copy":"cifra","duracion":"6s"},{"numero":4,"tipo":"desarrollo","copy":"detalle","duracion":"8s"},{"numero":5,"tipo":"cierre","copy":"remate","duracion":"5s"}],"copy_caption":"max 100 chars"}';
+    } else {
+      prompt = 'Miniatura 9:16 LOTELIER DIARIO. Titular:' + analysis.titular_editorial + '\nJSON: {"titular":"max 4 palabras","acento":"1 palabra verde","claim":"max 8 palabras","fuente_texto":"LOTELIER DIARIO"}';
+    }
+    callClaude(props.apiKey, SYS, prompt, function(t) { setStream(t); })
+      .then(function(raw) {
+        var clean = raw.replace(/```[a-z]*\n?|\n?```/g, '').trim();
+        var content = JSON.parse(clean);
+        var np = {id:Date.now()+'', format:format, source:src, analysis:analysis, content:content, status:'ready', createdAt:new Date().toISOString(), color:PAL[Math.floor(Math.random()*PAL.length)]};
+        S.save(np); props.onSaved(np); setPiece(np); setStep('result');
+      })
+      .catch(function(e) { setErr('Error: ' + e.message); setStep('analyzed'); });
+  };
+
+  return e('div', {style:{flex:1, overflow:'auto'}},
+    Top('Nueva pieza', Btn({ch:'Volver', v:'sec', sz:'sm', onClick:function(){props.go('home')}})),
+    e('div', {style:{maxWidth:650, margin:'0 auto', padding:'24px'}},
+      step==='input'||step==='analyzing' ? e('div', null,
+        e('div', {style:{display:'flex', gap:0, marginBottom:18, borderBottom:'1px solid #E4E3E0'}},
+          ['texto','url'].map(function(t) {
+            return e('button', {key:t, onClick:function(){setTab(t)}, style:{padding:'7px 16px', fontSize:13, fontWeight:tab===t?700:500, color:tab===t?'#3FB378':'#9E9B97', background:'transparent', border:'none', borderBottom:tab===t?'2px solid #3FB378':'2px solid transparent', cursor:'pointer', marginBottom:-1}}, t==='texto'?'Texto':'URL');
+          })
+        ),
+        tab === 'texto' ? e('div', {style:{marginBottom:13}},
+          e('label', {style:{display:'block', fontSize:10, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#9E9B97', marginBottom:5}}, 'TEXTO DE LA NOTICIA'),
+          e('textarea', {value:text, onChange:function(ev){setText(ev.target.value)}, placeholder:'Pega aqui el texto de la noticia...', style:{width:'100%', minHeight:150, padding:'10px 12px', border:'1px solid #E4E3E0', borderRadius:8, fontSize:13, lineHeight:1.6, resize:'vertical', outline:'none', background:'#F0EFED'}}),
+          e('div', {style:{fontSize:11, color:'#9E9B97', marginTop:2, textAlign:'right'}}, text.length + ' chars')
+        ) : e('div', {style:{marginBottom:13}},
+          e('input', {placeholder:'https://hosteltur.com/...', style:{width:'100%', padding:'0 11px', height:38, border:'1px solid #E4E3E0', borderRadius:8, fontSize:13, outline:'none', background:'#F0EFED'}})
+        ),
+        e('div', {style:{marginBottom:16}},
+          e('label', {style:{display:'block', fontSize:10, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#9E9B97', marginBottom:5}}, 'FUENTE'),
+          e('input', {value:src, onChange:function(ev){setSrc(ev.target.value)}, placeholder:'Hosteltur, Skift...', style:{width:'100%', padding:'0 10px', height:35, border:'1px solid #E4E3E0', borderRadius:7, fontSize:13, outline:'none', background:'#F0EFED'}})
+        ),
+        !props.apiKey ? e('div', {style:{background:'#FFF3E0', border:'1px solid #FED7AA', borderRadius:8, padding:'8px 11px', marginBottom:11, display:'flex', alignItems:'center', gap:8, fontSize:12, color:'#C35A00'}},
+          'Configura tu API key para usar el motor editorial.  ',
+          Btn({ch:'Configurar', v:'sec', sz:'sm', onClick:function(){props.setModal(true)}})
+        ) : null,
+        err ? e('div', {style:{background:'#FEE2E2', borderRadius:8, padding:'8px 11px', marginBottom:11, fontSize:12, color:'#B91C1C'}}, err) : null,
+        Btn({ch:step==='analyzing'?'Analizando...':'Analizar con motor editorial', v:'pri', sz:'lg', full:true, onClick:analyze, ld:step==='analyzing', dis:!text.trim()||step==='analyzing'})
+      ) : null,
+      step === 'analyzed' && analysis ? e('div', null,
+        e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, overflow:'hidden', marginBottom:16}},
+          e('div', {style:{padding:'11px 16px', borderBottom:'1px solid #E4E3E0', display:'flex', alignItems:'center', justifyContent:'space-between', background:'#202C44'}},
+            e('span', {style:{fontSize:13, fontWeight:700, color:'#fff'}}, 'Analisis editorial'),
+            e('div', {style:{display:'flex', gap:7, alignItems:'center'}},
+              Badge('Listo', 'ready'),
+              Btn({ch:'Editar', v:'sec', sz:'sm', onClick:function(){setStep('input')}})
+            )
+          ),
+          e('div', {style:{padding:'13px 16px', borderBottom:'1px solid #E4E3E0'}},
+            e('div', {style:{fontSize:9, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#9E9B97', marginBottom:5}}, 'TITULAR EDITORIAL'),
+            e('div', {style:{fontSize:20, fontWeight:900, color:'#202C44', lineHeight:1.1, fontFamily:"'Barlow Condensed',sans-serif", textTransform:'uppercase'}}, analysis.titular_editorial),
+            e('div', {style:{fontSize:13, color:'#6B6966', marginTop:5, lineHeight:1.4}}, analysis.subtitulo)
+          ),
+          analysis.datos && analysis.datos.length ? e('div', {style:{padding:'11px 16px', borderBottom:'1px solid #E4E3E0'}},
+            e('div', {style:{fontSize:9, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#9E9B97', marginBottom:7}}, 'DATOS CLAVE'),
+            e('div', {style:{display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:6}},
+              analysis.datos.map(function(d, i) {
+                return e('div', {key:i, style:{background:'#F0EFED', borderRadius:6, padding:'7px 10px', display:'flex', alignItems:'flex-start', gap:6}},
+                  e('div', {style:{width:4, height:4, borderRadius:'50%', background:'#3FB378', marginTop:5, flexShrink:0}}),
+                  e('span', {style:{fontSize:12, lineHeight:1.4}}, d)
+                );
+              })
+            )
+          ) : null,
+          e('div', {style:{padding:'11px 16px', display:'flex', alignItems:'center', gap:10}},
+            e('div', {style:{width:8, height:8, borderRadius:'50%', background:'#3FB378'}}),
+            e('div', null,
+              e('div', {style:{fontSize:12, fontWeight:700, color:'#202C44'}}, 'Voz LOTELIER - Canalla, Ironico, Directo'),
+              e('div', {style:{fontSize:11, color:'#9E9B97', marginTop:2}}, 'Tono fijo editorial')
+            )
+          )
+        ),
+        e('div', {style:{fontSize:13, fontWeight:700, marginBottom:10}}, 'Selecciona el formato'),
+        e('div', {style:{display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:9}},
+          [{id:'carousel',l:'Carrusel',d:'7 slides Instagram'},{id:'video',l:'Video',d:'Guion TikTok/Reels'},{id:'miniature',l:'Miniatura',d:'Portada 9:16'}].map(function(f) {
+            return e('div', {key:f.id, onClick:function(){generate(f.id)}, style:{border:'1.5px solid #E4E3E0', borderRadius:9, padding:'17px 12px', textAlign:'center', cursor:'pointer', background:'#fff'}},
+              e('div', {style:{fontSize:14, fontWeight:700, marginBottom:3}}, f.l),
+              e('div', {style:{fontSize:11, color:'#9E9B97', lineHeight:1.4}}, f.d)
+            );
+          })
+        ),
+        err ? e('div', {style:{background:'#FEE2E2', borderRadius:8, padding:'8px 11px', marginTop:10, fontSize:12, color:'#B91C1C'}}, err) : null
+      ) : null,
+      step === 'generating' ? e('div', {style:{textAlign:'center', padding:'40px 0'}},
+        e('div', {style:{width:50, height:50, borderRadius:13, background:'#EBF7F2', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 16px'}},
+          e('svg', {className:'spin', width:24, height:24, viewBox:'0 0 24 24', fill:'none'},
+            e('circle', {cx:12, cy:12, r:10, stroke:'#3FB378', strokeWidth:2.5, strokeDasharray:40, strokeDashoffset:15, strokeLinecap:'round'})
+          )
+        ),
+        e('h3', {style:{fontSize:17, fontWeight:800, marginBottom:6}}, 'Generando ' + (fmt==='carousel'?'carrusel':fmt==='video'?'video':'miniatura') + '...'),
+        stream ? e('div', {style:{background:'#F0EFED', borderRadius:8, padding:'11px', textAlign:'left', maxHeight:90, overflow:'hidden'}},
+          e('pre', {style:{fontSize:10, color:'#6B6966', fontFamily:'monospace', whiteSpace:'pre-wrap', lineHeight:1.4}}, stream.slice(-160))
+        ) : null
+      ) : null,
+      step === 'result' && piece ? e('div', null,
+        e('div', {style:{textAlign:'center', marginBottom:22}},
+          e('div', {style:{width:50, height:50, borderRadius:13, background:'#EBF7F2', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 13px', fontSize:20}}, 'OK'),
+          e('h3', {style:{fontSize:18, fontWeight:800, marginBottom:5}}, (piece.format==='carousel'?'Carrusel':piece.format==='video'?'Video':'Miniatura') + ' generado'),
+          e('p', {style:{fontSize:13, color:'#6B6966'}}, 'Guardado en tu biblioteca.')
+        ),
+        e('div', {style:{display:'flex', gap:8}},
+          Btn({ch:'Crear otra', v:'sec', sz:'md', full:true, onClick:function(){setStep('input');setText('');setAnalysis(null);setPiece(null);}}),
+          Btn({ch:'Biblioteca', v:'sec', sz:'md', full:true, onClick:function(){props.go('biblioteca');}})
+        )
+      ) : null
+    )
+  );
+}
+
+/* --- BIBLIOTECA --- */
+function Biblioteca(props) {
+  var s1 = useState('all'), f = s1[0], setF = s1[1];
+  var s2 = useState(''), q = s2[0], setQ = s2[1];
+  var filtered = props.pieces.filter(function(p) {
+    if (f !== 'all' && p.format !== f && p.status !== f) return false;
+    if (q && !(p.analysis&&p.analysis.titular_editorial||'').toLowerCase().includes(q.toLowerCase())) return false;
+    return true;
+  });
+  var FL = {carousel:'Carrusel', video:'Video', miniature:'Miniatura'};
+  return e('div', {style:{flex:1, overflow:'auto'}},
+    Top('Biblioteca', Btn({ch:'Nueva pieza', v:'pri', sz:'sm', onClick:function(){props.go('nueva')}})),
+    e('div', {style:{padding:'20px 26px'}},
+      e('div', {style:{display:'flex', gap:9, marginBottom:16, alignItems:'center'}},
+        e('input', {value:q, onChange:function(ev){setQ(ev.target.value);}, placeholder:'Buscar...', style:{flex:1, padding:'0 10px', height:35, border:'1px solid #E4E3E0', borderRadius:8, fontSize:13, outline:'none', background:'#F0EFED'}}),
+        e('div', {style:{display:'flex', gap:5}},
+          [{id:'all',l:'Todos'},{id:'carousel',l:'Carrusel'},{id:'video',l:'Video'},{id:'miniature',l:'Miniatura'},{id:'ready',l:'Listos'}].map(function(fi) {
+            return e('button', {key:fi.id, onClick:function(){setF(fi.id);}, style:{padding:'5px 10px', borderRadius:6, border:'1px solid', fontSize:11, fontWeight:600, cursor:'pointer', borderColor:f===fi.id?'#3FB378':'#E4E3E0', background:f===fi.id?'#EBF7F2':'transparent', color:f===fi.id?'#1E6B43':'#6B6966'}}, fi.l);
+          })
+        )
+      ),
+      filtered.length === 0 ? e('div', {style:{textAlign:'center', padding:'52px 0'}},
+        e('p', {style:{fontSize:13, color:'#9E9B97', marginBottom:16}}, props.pieces.length===0 ? 'Sin piezas todavia.' : 'Sin resultados.'),
+        Btn({ch:'Crear primera pieza', v:'pri', sz:'md', onClick:function(){props.go('nueva');}})
+      ) : e('div', {style:{display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(250px,1fr))', gap:12}},
+        filtered.map(function(p) {
+          return e('div', {key:p.id, style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:11, overflow:'hidden'}},
+            e('div', {style:{height:100, background:p.color||'#202C44', position:'relative', overflow:'hidden', cursor:'pointer'}},
+              e('div', {style:{position:'absolute', bottom:9, left:11, right:11, fontFamily:"'Barlow Condensed',sans-serif", fontSize:14, fontWeight:900, color:'#fff', lineHeight:1.15, textTransform:'uppercase'}}, p.analysis&&p.analysis.titular_editorial||'Sin titulo'),
+              e('div', {style:{position:'absolute', top:9, right:9, display:'flex', flexDirection:'column', gap:3, alignItems:'flex-end'}},
+                Badge(p.status==='ready'?'Listo':p.status==='pub'?'Publicado':'Borrador', p.status==='ready'?'ready':p.status==='pub'?'pub':'def'),
+                Badge(FL[p.format]||p.format, 'def')
+              )
+            ),
+            e('div', {style:{padding:'10px 12px'}},
+              e('div', {style:{fontSize:11, color:'#9E9B97', marginBottom:8}}, new Date(p.createdAt).toLocaleDateString('es-ES',{day:'numeric',month:'short'}) + ' - ' + (p.source||'-')),
+              e('div', {style:{display:'flex', gap:6}},
+                Badge(FL[p.format]||p.format, 'def'),
+                e('div', {style:{marginLeft:'auto'}}, Btn({ch:'x', v:'ghost', sz:'sm', onClick:function(){props.onDelete(p.id);}}))
+              )
+            )
+          );
+        })
+      )
+    )
+  );
+}
+
+/* --- AJUSTES --- */
+function Ajustes(props) {
+  var s1 = useState(S.prefs()), prefs = s1[0], setPrefs = s1[1];
+  var s2 = useState(false), saved = s2[0], setSaved = s2[1];
+  var upd = function(f, v) { setPrefs(function(p) { var np = Object.assign({}, p); np[f] = v; return np; }); };
+  var save = function() { S.setPrefs(prefs); setSaved(true); setTimeout(function(){setSaved(false);}, 2000); };
+  return e('div', {style:{flex:1, overflow:'auto'}},
+    Top('Ajustes', e('div', {style:{display:'flex', gap:8, alignItems:'center'}},
+      saved ? e('span', {style:{fontSize:11, fontWeight:600, color:'#3FB378'}}, 'OK Guardado') : null,
+      Btn({ch:'Guardar', v:'pri', sz:'sm', onClick:save})
+    )),
+    e('div', {style:{maxWidth:580, margin:'0 auto', padding:'26px'}},
+      e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, overflow:'hidden', marginBottom:18}},
+        e('div', {style:{padding:'11px 16px', borderBottom:'1px solid #E4E3E0'}}, e('span', {style:{fontSize:13, fontWeight:700}}, 'Conexion API')),
+        e('div', {style:{padding:'14px 16px', display:'flex', alignItems:'center', justifyContent:'space-between'}},
+          e('div', {style:{display:'flex', alignItems:'center', gap:10}},
+            e('div', {style:{width:10, height:10, borderRadius:'50%', background:props.apiKey?'#3FB378':'#F59E0B'}}),
+            e('div', null,
+              e('div', {style:{fontSize:13, fontWeight:600}}, props.apiKey ? 'Motor editorial activo' : 'Sin API key'),
+              e('div', {style:{fontSize:11, color:'#9E9B97'}}, props.apiKey ? 'sk-ant-...'+props.apiKey.slice(-6) : 'Necesitas una API key de Anthropic')
+            )
+          ),
+          Btn({ch:'Cambiar API key', v:'sec', sz:'sm', onClick:function(){props.setModal(true);}})
+        )
+      ),
+      e('div', {style:{background:'#fff', border:'1px solid #E4E3E0', borderRadius:12, overflow:'hidden', marginBottom:18}},
+        e('div', {style:{padding:'11px 16px', borderBottom:'1px solid #E4E3E0', background:'#202C44'}}, e('span', {style:{fontSize:13, fontWeight:700, color:'#fff'}}, 'Preferencias editoriales')),
+        e('div', {style:{padding:'16px'}},
+          e('div', {style:{marginBottom:16}},
+            e('label', {style:{display:'block', fontSize:10, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#9E9B97', marginBottom:8}}, 'INTENSIDAD ' + prefs.intensidad + '/5'),
+            e('div', {style:{display:'flex', gap:6}},
+              [1,2,3,4,5].map(function(n) {
+                return e('div', {key:n, onClick:function(){upd('intensidad',n);}, style:{flex:1, height:10, borderRadius:4, background:n<=prefs.intensidad?'#3FB378':'#E4E3E0', cursor:'pointer'}});
+              })
+            )
+          )
+        )
+      ),
+      Btn({ch:'Guardar preferencias', v:'pri', sz:'lg', full:true, onClick:save})
+    )
+  );
+}
+
+/* --- APP --- */
+function App() {
+  var s1 = useState('home'), act = s1[0], setAct = s1[1];
+  var s2 = useState(null), pre = s2[0], setPre = s2[1];
+  var s3 = useState(S.key()), apiKey = s3[0], setApiKey = s3[1];
+  var s4 = useState(false), modal = s4[0], setModal = s4[1];
+  var s5 = useState(S.pieces()), pieces = s5[0], setPieces = s5[1];
+
+  var go = function(screen) { setAct(screen); if (screen !== 'nueva') setPre(null); };
+  var onSaved = function() { setPieces(S.pieces()); };
+  var onDelete = function(id) { S.del(id); setPieces(S.pieces()); };
+  var onApiSave = function(k) { setApiKey(k); setModal(false); };
+
+  var screen;
+  if (act === 'home') screen = e(Home, {go:go, setPre:setPre, pieces:pieces});
+  else if (act === 'briefing') screen = e(Briefing, {go:go, setPre:setPre, apiKey:apiKey, setModal:setModal});
+  else if (act === 'nueva') screen = e(Nueva, {pre:pre, go:go, apiKey:apiKey, setModal:setModal, onSaved:onSaved});
+  else if (act === 'biblioteca') screen = e(Biblioteca, {pieces:pieces, go:go, onDelete:onDelete});
+  else if (act === 'ajustes') screen = e(Ajustes, {apiKey:apiKey, setModal:setModal});
+  else screen = e(Home, {go:go, setPre:setPre, pieces:pieces});
+
+  return e('div', null,
+    modal ? e(ApiModal, {onSave:onApiSave, onClose:function(){setModal(false);}, cur:apiKey}) : null,
+    e('div', {style:{display:'flex', minHeight:'100vh', background:'#F7F7F6'}},
+      e(Sidebar, {act:act, go:go, apiKey:apiKey, setModal:setModal, pieces:pieces}),
+      screen
+    )
+  );
+}
+
+/* --- BOOT --- */
+ReactDOM.createRoot(document.getElementById('root')).render(e(App, null));
+
+})();
+</script>
+</body>
+</html>
